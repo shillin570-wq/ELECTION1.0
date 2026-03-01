@@ -24,9 +24,35 @@ interface StateData {
   crises: Crisis[];
 }
 
+const getTodayIsoDate = () => new Date().toISOString().slice(0, 10);
+
+const formatDateParts = (isoDate: string) => {
+  const [year = '----', month = '--', day = '--'] = isoDate.split('-');
+  return { year, month, day };
+};
+
+const formatHeaderDate = (isoDate: string) => {
+  const date = new Date(`${isoDate}T00:00:00`);
+  if (Number.isNaN(date.getTime())) {
+    return 'DATE --';
+  }
+  return date
+    .toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+    .toUpperCase();
+};
+
 const LOCAL_ACCOUNTS: Array<{ id: string; username: string; password: string; role: 'admin' | 'viewer' }> = [
   { id: 'u1', username: 'SAMUN ELECTION', password: 'ACMUNC2026', role: 'admin' },
-  { id: 'u2', username: 'SAMUN', password: 'ELECTION2020', role: 'viewer' }
+  { id: 'u2', username: 'SAMUN', password: 'ELECTION2020', role: 'viewer' },
+  { id: 'u3', username: 'Georgia', password: 'ELECTION2020', role: 'viewer' },
+  { id: 'u4', username: 'Pennsylvania', password: 'ELECTION2020', role: 'viewer' },
+  { id: 'u5', username: 'Michigan', password: 'ELECTION2020', role: 'viewer' },
+  { id: 'u6', username: 'Arizona', password: 'ELECTION2020', role: 'viewer' },
+  { id: 'u7', username: 'Wisconsin', password: 'ELECTION2020', role: 'viewer' },
+  { id: 'u8', username: 'Nevada', password: 'ELECTION2020', role: 'viewer' },
+  { id: 'u9', username: 'North Carolina', password: 'ELECTION2020', role: 'viewer' },
+  { id: 'u10', username: 'Democratic', password: 'ELECTION2020', role: 'viewer' },
+  { id: 'u11', username: 'Republican', password: 'ELECTION2020', role: 'viewer' }
 ];
 
 const getTensionColor = (level: TensionLevel) => {
@@ -36,6 +62,35 @@ const getTensionColor = (level: TensionLevel) => {
     case '中等': return 'text-[#D4AF37] bg-[#D4AF37]/10 border-[#D4AF37]/30';
     default: return 'text-gray-400 bg-gray-400/10 border-gray-400/30';
   }
+};
+
+const calculateStateOverallTension = (crises: Crisis[]): TensionLevel => {
+  if (crises.length === 0) {
+    return '较低';
+  }
+
+  const counts = crises.reduce(
+    (acc, crisis) => {
+      acc[crisis.tension] += 1;
+      return acc;
+    },
+    { '极高': 0, '高': 0, '中等': 0, '较低': 0 } as Record<TensionLevel, number>
+  );
+
+  const weightedScore =
+    (counts['极高'] * 4 + counts['高'] * 3 + counts['中等'] * 2 + counts['较低']) / crises.length;
+
+  // "极高"占比很高或综合评分很高时，判定为州级极高。
+  if (counts['极高'] >= 2 || weightedScore >= 3.4) {
+    return '极高';
+  }
+  if (counts['高'] + counts['极高'] >= 2 || weightedScore >= 2.6) {
+    return '高';
+  }
+  if (counts['中等'] + counts['高'] + counts['极高'] > 0) {
+    return '中等';
+  }
+  return '较低';
 };
 
 const Logo = ({ className, style }: { className?: string, style?: React.CSSProperties }) => (
@@ -125,16 +180,13 @@ const CrisisCard = ({
         {crisis.details}
       </p>
       
-      <div className="mt-auto pt-4 border-t border-white/5 flex justify-between items-center">
+      <div className="mt-auto pt-4 border-t border-white/5 flex items-center">
         <div className="flex items-center gap-1.5 text-xs text-gray-500 font-mono">
           <span>TREND</span>
           {crisis.trend === 'up' && <TrendingUp size={14} className="text-[#A34A51]" />}
           {crisis.trend === 'down' && <TrendingUp size={14} className="text-green-500 transform rotate-180" />}
           {crisis.trend === 'stable' && <Activity size={14} className="text-gray-400" />}
         </div>
-        <button className="text-xs text-white/40 hover:text-white transition-colors flex items-center gap-1 cursor-pointer">
-          追踪 <ChevronRight size={12} />
-        </button>
       </div>
     </div>
   );
@@ -152,7 +204,16 @@ export default function App() {
   const [activeStateId, setActiveStateId] = useState<string>('');
   const [isAddingCrisis, setIsAddingCrisis] = useState(false);
   const [editingCrisisId, setEditingCrisisId] = useState<string | null>(null);
-  const [formData, setFormData] = useState({ title: '', details: '', tension: '中等' as TensionLevel, trend: 'up' as 'up' | 'down' | 'stable' });
+  const [formData, setFormData] = useState({
+    time: '',
+    title: '',
+    details: '',
+    tension: '中等' as TensionLevel,
+    trend: 'up' as 'up' | 'down' | 'stable'
+  });
+  const [displayDate, setDisplayDate] = useState<string>(getTodayIsoDate());
+  const [isEditingDisplayDate, setIsEditingDisplayDate] = useState(false);
+  const [dateInput, setDateInput] = useState<string>(getTodayIsoDate());
 
   const formatCrisisTime = () => {
     const now = new Date();
@@ -189,9 +250,10 @@ export default function App() {
 
   const fetchData = async () => {
     try {
-      const [{ data: states, error: statesError }, { data: crises, error: crisesError }] = await Promise.all([
+      const [{ data: states, error: statesError }, { data: crises, error: crisesError }, { data: settings, error: settingsError }] = await Promise.all([
         supabase.from('states').select('*'),
-        supabase.from('crises').select('*')
+        supabase.from('crises').select('*'),
+        supabase.from('app_settings').select('display_date').eq('id', 1).maybeSingle()
       ]);
 
       if (statesError) {
@@ -200,13 +262,25 @@ export default function App() {
       if (crisesError) {
         throw crisesError;
       }
+      if (settingsError) {
+        throw settingsError;
+      }
 
-      const grouped = (states || []).map((state: any) => ({
-        ...state,
-        crises: (crises || []).filter((c: any) => c.state_id === state.id)
-      })) as StateData[];
+      const grouped = (states || []).map((state: any) => {
+        const stateCrises = ((crises || []).filter((c: any) => c.state_id === state.id) as Crisis[]);
+        return {
+          ...state,
+          overallTension: calculateStateOverallTension(stateCrises),
+          crises: stateCrises
+        };
+      }) as StateData[];
 
       setStatesData(grouped);
+      const currentDate = settings?.display_date || getTodayIsoDate();
+      setDisplayDate(currentDate);
+      if (!isEditingDisplayDate) {
+        setDateInput(currentDate);
+      }
       if (grouped.length > 0 && !activeStateId) {
         setActiveStateId(grouped[0].id);
       }
@@ -228,6 +302,9 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'crises' }, () => {
         fetchData();
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'app_settings' }, () => {
+        fetchData();
+      })
       .subscribe();
 
     return () => {
@@ -235,7 +312,27 @@ export default function App() {
     };
   }, [isAuthenticated]);
 
+  const handleUpdateDisplayDate = async () => {
+    const nextDate = dateInput || getTodayIsoDate();
+    try {
+      const { error } = await supabase
+        .from('app_settings')
+        .upsert({ id: 1, display_date: nextDate }, { onConflict: 'id' });
+
+      if (error) {
+        throw error;
+      }
+      setDisplayDate(nextDate);
+      setIsEditingDisplayDate(false);
+    } catch (err) {
+      console.error('Failed to update display date', err);
+      alert('更新日期失败，请稍后重试。');
+    }
+  };
+
   const activeState = statesData.find(s => s.id === activeStateId) || statesData[0];
+  const dateParts = formatDateParts(displayDate);
+  const headerDateLabel = formatHeaderDate(displayDate);
 
   const handleUpdateTension = async (id: string, tension: TensionLevel) => {
     try {
@@ -270,6 +367,7 @@ export default function App() {
   const openEditForm = (crisis: Crisis) => {
     setEditingCrisisId(crisis.id);
     setFormData({
+      time: crisis.time,
       title: crisis.title,
       details: crisis.details,
       tension: crisis.tension,
@@ -280,7 +378,7 @@ export default function App() {
 
   const openAddForm = () => {
     setEditingCrisisId(null);
-    setFormData({ title: '', details: '', tension: '中等', trend: 'up' });
+    setFormData({ time: formatCrisisTime(), title: '', details: '', tension: '中等', trend: 'up' });
     setIsAddingCrisis(true);
   };
 
@@ -306,7 +404,6 @@ export default function App() {
           .insert({
             id: `${activeStateId}-${Date.now()}`,
             state_id: activeStateId,
-            time: formatCrisisTime(),
             ...formData
           });
         if (error) {
@@ -493,10 +590,10 @@ export default function App() {
               <LogOut size={16} />
             </button>
             <div className="text-right hidden md:block border-l border-white/10 pl-4">
-              <div className="text-[#A34A51] font-mono font-bold text-lg">NOV 2020</div>
+              <div className="text-[#A34A51] font-mono font-bold text-lg">{headerDateLabel}</div>
               <div className="text-xs text-gray-400 uppercase tracking-wider flex items-center justify-end gap-2">
                 <span className="w-2 h-2 rounded-full bg-[#A34A51] animate-pulse"></span>
-                Historical Archive
+                Live Timeline
               </div>
             </div>
           </div>
@@ -515,24 +612,66 @@ export default function App() {
           </div>
           
           {/* Overall Threat Meter */}
-          <div className="bg-[#131B2F] border border-[#A34A51]/30 rounded-2xl p-6 flex items-center gap-6 min-w-[300px] shadow-[0_0_40px_rgba(163,74,81,0.15)]">
+          <div className="bg-[#131B2F] border border-[#A34A51]/30 rounded-2xl p-6 flex items-center gap-6 min-w-[340px] shadow-[0_0_40px_rgba(163,74,81,0.15)] relative">
             <div className="relative w-20 h-20 flex items-center justify-center">
               <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
                 <circle cx="50" cy="50" r="45" fill="none" stroke="#1F2937" strokeWidth="8" />
                 <circle cx="50" cy="50" r="45" fill="none" stroke="#A34A51" strokeWidth="8" strokeDasharray="283" strokeDashoffset="42" className="transition-all duration-1000" />
               </svg>
               <div className="absolute inset-0 flex items-center justify-center flex-col">
-                <span className="text-2xl font-bold text-[#A34A51] font-mono">85</span>
-                <span className="text-[10px] text-gray-400 font-mono">INDEX</span>
+                <span className="text-2xl font-bold text-[#A34A51] font-mono">{dateParts.day}</span>
+                <span className="text-[10px] text-gray-400 font-mono">DAY</span>
               </div>
             </div>
             <div>
-              <div className="text-sm text-gray-400 font-mono mb-1">NATIONAL TENSION</div>
-              <div className="text-2xl font-bold text-white tracking-widest">CRITICAL</div>
+              <div className="text-sm text-gray-400 font-mono mb-1">CURRENT DATE</div>
+              <div className="text-2xl font-bold text-white tracking-widest">{dateParts.year}.{dateParts.month}</div>
               <div className="text-xs text-[#A34A51] mt-1 flex items-center gap-1 font-mono">
-                <ShieldAlert size={12} /> Unprecedented Level
+                <Clock size={12} /> {displayDate}
               </div>
             </div>
+            {isAdmin && (
+              <div className="absolute right-4 top-4">
+                {isEditingDisplayDate ? (
+                  <div className="flex items-center gap-2 bg-black/50 p-2 rounded-lg border border-white/10">
+                    <input
+                      type="date"
+                      value={dateInput}
+                      onChange={(e) => setDateInput(e.target.value)}
+                      className="bg-[#0B0F19] border border-white/15 rounded px-2 py-1 text-xs text-white outline-none focus:border-[#A34A51]"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleUpdateDisplayDate}
+                      className="text-green-400 hover:text-green-300"
+                      title="保存日期"
+                    >
+                      <Check size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDateInput(displayDate);
+                        setIsEditingDisplayDate(false);
+                      }}
+                      className="text-gray-400 hover:text-white"
+                      title="取消"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingDisplayDate(true)}
+                    className="p-2 rounded bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white transition-colors"
+                    title="修改日期"
+                  >
+                    <Edit2 size={14} />
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -563,10 +702,6 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-2 text-xs">
                     <span className="text-gray-400 font-mono">{state.electoralVotes} EV</span>
-                    <span className="w-1 h-1 rounded-full bg-gray-600"></span>
-                    <span className={state.overallTension === '极高' ? 'text-[#A34A51]' : state.overallTension === '高' ? 'text-[#D97757]' : 'text-[#D4AF37]'}>
-                      {state.overallTension}
-                    </span>
                   </div>
                 </div>
                 <ChevronRight size={18} className={`${activeStateId === state.id ? 'text-[#A34A51]' : 'text-gray-600 group-hover:text-gray-400'} transition-colors`} />
@@ -604,10 +739,19 @@ export default function App() {
                     添加危机
                   </button>
                 )}
-                <div className={`px-4 py-2.5 rounded-lg border text-sm font-bold flex items-center gap-2 ${getTensionColor(activeState.overallTension)} bg-[#0B0F19]`}>
-                  <span className="text-gray-400 font-mono text-xs mr-1">STATE TENSION</span>
-                  {activeState.overallTension === '极高' ? <ShieldAlert size={16} /> : <Activity size={16} />}
-                  {activeState.overallTension}
+                <div className="relative px-4 py-2.5 rounded-lg border border-[#A34A51]/30 bg-[#0B0F19] overflow-hidden min-w-[220px]">
+                  <div className="absolute inset-0 bg-[radial-gradient(circle_at_80%_20%,rgba(163,74,81,0.22),transparent_55%)] pointer-events-none"></div>
+                  <div className="relative z-10 flex items-center justify-between gap-4">
+                    <div className="text-left">
+                      <div className="text-[10px] text-gray-500 font-mono uppercase tracking-[0.25em]">Swing State Brief</div>
+                      <div className="text-sm text-white font-serif tracking-wide">Election Watch</div>
+                    </div>
+                    <div className="flex items-end gap-1.5 h-7">
+                      <span className="w-1.5 h-3 rounded bg-white/30"></span>
+                      <span className="w-1.5 h-5 rounded bg-[#D97757]/70"></span>
+                      <span className="w-1.5 h-7 rounded bg-[#A34A51]"></span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -664,6 +808,17 @@ export default function App() {
                       </select>
                     </div>
                   </div>
+                </div>
+                <div className="mb-4">
+                  <label className="block text-xs text-gray-400 mb-1">事件时间</label>
+                  <input
+                    required
+                    type="text"
+                    value={formData.time}
+                    onChange={e => setFormData({ ...formData, time: e.target.value })}
+                    className="w-full bg-[#0B0F19] border border-white/10 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-[#A34A51]"
+                    placeholder="格式：MM-DD HH:mm（示例 11-04 14:15）"
+                  />
                 </div>
                 <div className="mb-6">
                   <label className="block text-xs text-gray-400 mb-1">详细描述</label>

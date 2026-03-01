@@ -37,6 +37,12 @@ create table if not exists public.crises (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.app_settings (
+  id integer primary key,
+  display_date date not null,
+  updated_at timestamptz not null default now()
+);
+
 create or replace function public.set_updated_at()
 returns trigger
 language plpgsql
@@ -57,15 +63,22 @@ create trigger crises_set_updated_at
 before update on public.crises
 for each row execute function public.set_updated_at();
 
+drop trigger if exists app_settings_set_updated_at on public.app_settings;
+create trigger app_settings_set_updated_at
+before update on public.app_settings
+for each row execute function public.set_updated_at();
+
 create index if not exists idx_crises_state_id on public.crises(state_id);
 create index if not exists idx_crises_tension on public.crises(tension);
 
 alter table public.states disable row level security;
 alter table public.crises disable row level security;
+alter table public.app_settings disable row level security;
 
 grant usage on schema public to anon, authenticated;
 grant select, insert, update, delete on public.states to anon, authenticated;
 grant select, insert, update, delete on public.crises to anon, authenticated;
+grant select, insert, update, delete on public.app_settings to anon, authenticated;
 
 do $$
 begin
@@ -77,8 +90,17 @@ begin
     alter publication supabase_realtime add table public.crises;
   exception when duplicate_object then null;
   end;
+  begin
+    alter publication supabase_realtime add table public.app_settings;
+  exception when duplicate_object then null;
+  end;
 end
 $$;
+
+insert into public.app_settings (id, display_date)
+values (1, current_date)
+on conflict (id) do update
+set display_date = excluded.display_date;
 
 insert into public.states (id, "stateName", "stateEn", "electoralVotes", "overallTension")
 values
