@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Activity, ShieldAlert, TrendingUp, ChevronRight, Clock, Plus, Edit2, Trash2, X, Check, LogOut, Sparkles, AlertTriangle } from 'lucide-react';
 import { motion } from 'motion/react';
 import { supabase } from './supabase';
@@ -165,14 +165,12 @@ const CrisisCard = ({
   key?: string | number 
 }) => {
   const isCritical = crisis.tension === '极高';
-  const [hasClicked, setHasClicked] = useState(false);
   const createdAt = toEpoch(crisis.created_at);
   const updatedAt = toEpoch(crisis.updated_at);
   const now = Date.now();
   const isRecentlyCreated = createdAt > 0 && now - createdAt <= 10 * 60 * 1000;
   const isRecentlyUpdated = updatedAt > 0 && updatedAt > createdAt && now - updatedAt <= 10 * 60 * 1000;
   const shouldHighlightNewCard = isRecentlyCreated;
-  const shouldPulseNewCard = shouldHighlightNewCard && !hasClicked;
   
   return (
     <div className={`relative p-5 rounded-xl border transition-all duration-300 overflow-hidden group flex flex-col
@@ -182,7 +180,6 @@ const CrisisCard = ({
           : `bg-[#131B2F] ${isCritical ? 'border-[#A34A51]/50 shadow-[0_0_20px_rgba(163,74,81,0.15)]' : 'border-white/5 hover:border-white/20'}`
       } cursor-pointer`}
       onClick={() => {
-        setHasClicked(true);
         onOpenDetail(crisis);
       }}
     >
@@ -321,6 +318,9 @@ export default function App() {
     trend: 'up' as 'up' | 'down' | 'stable'
   });
   const [stateTensionInput, setStateTensionInput] = useState<string>('0');
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isFetchingRef = useRef(false);
+  const queuedFetchRef = useRef(false);
 
   const formatCrisisTime = () => {
     const now = new Date();
@@ -356,6 +356,11 @@ export default function App() {
   };
 
   const fetchData = async () => {
+    if (isFetchingRef.current) {
+      queuedFetchRef.current = true;
+      return;
+    }
+    isFetchingRef.current = true;
     try {
       const [
         { data: states, error: statesError },
@@ -435,7 +440,26 @@ export default function App() {
       }
     } catch (err) {
       console.error('Failed to fetch data', err);
+    } finally {
+      isFetchingRef.current = false;
+      if (queuedFetchRef.current) {
+        queuedFetchRef.current = false;
+        void fetchData();
+      }
     }
+  };
+
+  const scheduleDataRefresh = (delayMs = 250) => {
+    if (!isAuthenticated) {
+      return;
+    }
+    if (refreshTimerRef.current) {
+      clearTimeout(refreshTimerRef.current);
+    }
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      void fetchData();
+    }, delayMs);
   };
 
   useEffect(() => {
@@ -446,20 +470,24 @@ export default function App() {
     const channel = supabase
       .channel('election-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'states' }, () => {
-        fetchData();
+        scheduleDataRefresh(220);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'crises' }, () => {
-        fetchData();
+        scheduleDataRefresh(220);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'app_settings' }, () => {
-        fetchData();
+        scheduleDataRefresh(220);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'national_crises' }, () => {
-        fetchData();
+        scheduleDataRefresh(220);
       })
       .subscribe();
 
     return () => {
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
       supabase.removeChannel(channel);
     };
   }, [isAuthenticated]);
@@ -518,7 +546,7 @@ export default function App() {
       if (error) {
         throw error;
       }
-      fetchData();
+      scheduleDataRefresh(120);
     } catch (err) {
       console.error('Failed to update tension', err);
     }
@@ -533,7 +561,7 @@ export default function App() {
       if (error) {
         throw error;
       }
-      fetchData();
+      scheduleDataRefresh(120);
     } catch (err) {
       console.error('Failed to delete crisis', err);
     }
@@ -548,7 +576,7 @@ export default function App() {
       if (error) {
         throw error;
       }
-      fetchData();
+      scheduleDataRefresh(120);
     } catch (err) {
       console.error('Failed to delete national crisis', err);
     }
@@ -584,7 +612,7 @@ export default function App() {
       if (error) {
         throw error;
       }
-      fetchData();
+      scheduleDataRefresh(120);
     } catch (err) {
       console.error('Failed to update national tension', err);
     }
@@ -703,7 +731,7 @@ export default function App() {
         }
       }
       closeForm();
-      fetchData();
+      scheduleDataRefresh(120);
     } catch (err) {
       console.error('Failed to save crisis', err);
     }
@@ -732,7 +760,7 @@ export default function App() {
         }
       }
       closeNationalForm();
-      fetchData();
+      scheduleDataRefresh(120);
     } catch (err) {
       console.error('Failed to save national crisis', err);
     }
