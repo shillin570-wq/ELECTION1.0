@@ -21,6 +21,7 @@ create table if not exists public.states (
   "stateEn" text not null,
   "electoralVotes" integer not null check ("electoralVotes" > 0),
   "overallTension" public.tension_level not null,
+  tension_percent integer not null default 60 check (tension_percent >= 0 and tension_percent <= 100),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -37,11 +38,80 @@ create table if not exists public.crises (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.national_crises (
+  id text primary key,
+  time text not null,
+  title text not null,
+  details text not null,
+  tension public.tension_level not null,
+  trend public.trend_level not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists public.app_settings (
   id integer primary key,
   display_date date not null,
+  national_tension_percent integer not null default 85 check (national_tension_percent >= 0 and national_tension_percent <= 100),
   updated_at timestamptz not null default now()
 );
+
+-- Backward-compatible migration for existing databases.
+do $$
+begin
+  -- Old schema had `current_date`; rename to `display_date` if needed.
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public' and table_name = 'app_settings' and column_name = 'current_date'
+  ) and not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public' and table_name = 'app_settings' and column_name = 'display_date'
+  ) then
+    alter table public.app_settings rename column "current_date" to display_date;
+  end if;
+
+  -- Ensure state percentage column exists for old schema.
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public' and table_name = 'states' and column_name = 'tension_percent'
+  ) then
+    alter table public.states add column tension_percent integer;
+  end if;
+
+  -- Ensure national percentage column exists for old schema.
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public' and table_name = 'app_settings' and column_name = 'national_tension_percent'
+  ) then
+    alter table public.app_settings add column national_tension_percent integer;
+  end if;
+end
+$$;
+
+update public.states
+set tension_percent = 60
+where tension_percent is null;
+
+alter table public.states
+  alter column tension_percent set default 60,
+  alter column tension_percent set not null;
+
+update public.app_settings
+set display_date = current_date
+where display_date is null;
+
+update public.app_settings
+set national_tension_percent = 85
+where national_tension_percent is null;
+
+alter table public.app_settings
+  alter column display_date set not null,
+  alter column national_tension_percent set default 85,
+  alter column national_tension_percent set not null;
 
 create or replace function public.set_updated_at()
 returns trigger
@@ -63,6 +133,11 @@ create trigger crises_set_updated_at
 before update on public.crises
 for each row execute function public.set_updated_at();
 
+drop trigger if exists national_crises_set_updated_at on public.national_crises;
+create trigger national_crises_set_updated_at
+before update on public.national_crises
+for each row execute function public.set_updated_at();
+
 drop trigger if exists app_settings_set_updated_at on public.app_settings;
 create trigger app_settings_set_updated_at
 before update on public.app_settings
@@ -70,14 +145,17 @@ for each row execute function public.set_updated_at();
 
 create index if not exists idx_crises_state_id on public.crises(state_id);
 create index if not exists idx_crises_tension on public.crises(tension);
+create index if not exists idx_national_crises_tension on public.national_crises(tension);
 
 alter table public.states disable row level security;
 alter table public.crises disable row level security;
+alter table public.national_crises disable row level security;
 alter table public.app_settings disable row level security;
 
 grant usage on schema public to anon, authenticated;
 grant select, insert, update, delete on public.states to anon, authenticated;
 grant select, insert, update, delete on public.crises to anon, authenticated;
+grant select, insert, update, delete on public.national_crises to anon, authenticated;
 grant select, insert, update, delete on public.app_settings to anon, authenticated;
 
 do $$
@@ -91,32 +169,50 @@ begin
   exception when duplicate_object then null;
   end;
   begin
+    alter publication supabase_realtime add table public.national_crises;
+  exception when duplicate_object then null;
+  end;
+  begin
     alter publication supabase_realtime add table public.app_settings;
   exception when duplicate_object then null;
   end;
 end
 $$;
 
-insert into public.app_settings (id, display_date)
-values (1, current_date)
+insert into public.app_settings (id, display_date, national_tension_percent)
+values (1, current_date, 85)
 on conflict (id) do update
-set display_date = excluded.display_date;
+set
+  display_date = excluded.display_date,
+  national_tension_percent = excluded.national_tension_percent;
 
-insert into public.states (id, "stateName", "stateEn", "electoralVotes", "overallTension")
+insert into public.national_crises (id, time, title, details, tension, trend)
 values
-  ('pa', '宾夕法尼亚州', 'Pennsylvania', 20, '极高'),
-  ('ga', '佐治亚州', 'Georgia', 16, '极高'),
-  ('mi', '密歇根州', 'Michigan', 16, '极高'),
-  ('az', '亚利桑那州', 'Arizona', 11, '高'),
-  ('wi', '威斯康星州', 'Wisconsin', 10, '高'),
-  ('nv', '内华达州', 'Nevada', 6, '中等'),
-  ('nc', '北卡罗来纳州', 'North Carolina', 15, '中等')
+  ('nat-1', '11-05 20:00', '全国性选后法律战升级', '多个摇摆州同步出现法律挑战与重新计票诉讼，媒体和公众对最终认证流程高度关注。', '高', 'up')
+on conflict (id) do update
+set
+  time = excluded.time,
+  title = excluded.title,
+  details = excluded.details,
+  tension = excluded.tension,
+  trend = excluded.trend;
+
+insert into public.states (id, "stateName", "stateEn", "electoralVotes", "overallTension", tension_percent)
+values
+  ('pa', '宾夕法尼亚州', 'Pennsylvania', 20, '极高', 90),
+  ('ga', '佐治亚州', 'Georgia', 16, '极高', 88),
+  ('mi', '密歇根州', 'Michigan', 16, '极高', 87),
+  ('az', '亚利桑那州', 'Arizona', 11, '高', 76),
+  ('wi', '威斯康星州', 'Wisconsin', 10, '高', 74),
+  ('nv', '内华达州', 'Nevada', 6, '中等', 58),
+  ('nc', '北卡罗来纳州', 'North Carolina', 15, '中等', 61)
 on conflict (id) do update
 set
   "stateName" = excluded."stateName",
   "stateEn" = excluded."stateEn",
   "electoralVotes" = excluded."electoralVotes",
-  "overallTension" = excluded."overallTension";
+  "overallTension" = excluded."overallTension",
+  tension_percent = excluded.tension_percent;
 
 insert into public.crises (id, state_id, time, title, details, tension, trend)
 values

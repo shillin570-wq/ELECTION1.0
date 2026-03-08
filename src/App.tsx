@@ -5,14 +5,24 @@ import { supabase } from './supabase';
 
 type TensionLevel = '极高' | '高' | '中等' | '较低';
 
-interface Crisis {
+interface CrisisBase {
   id: string;
-  state_id: string;
   time: string;
   title: string;
   details: string;
   tension: TensionLevel;
   trend: 'up' | 'down' | 'stable';
+}
+
+interface Crisis extends CrisisBase {
+  state_id: string;
+}
+
+interface NationalCrisis extends CrisisBase {
+}
+
+interface CrisisDetailModalData extends CrisisBase {
+  scopeLabel: string;
 }
 
 interface StateData {
@@ -21,6 +31,7 @@ interface StateData {
   stateEn: string;
   electoralVotes: number;
   overallTension: TensionLevel;
+  tensionPercent: number;
   crises: Crisis[];
 }
 
@@ -41,6 +52,21 @@ const formatHeaderDate = (isoDate: string) => {
     .toUpperCase();
 };
 
+const clampPercent = (value: number) => Math.max(0, Math.min(100, Math.round(value)));
+
+const defaultPercentByLevel = (level: TensionLevel) => {
+  switch (level) {
+    case '极高':
+      return 90;
+    case '高':
+      return 72;
+    case '中等':
+      return 50;
+    default:
+      return 30;
+  }
+};
+
 const LOCAL_ACCOUNTS: Array<{ id: string; username: string; password: string; role: 'admin' | 'viewer' }> = [
   { id: 'u1', username: 'SAMUN ELECTION', password: 'ACMUNC2026', role: 'admin' },
   { id: 'u2', username: 'SAMUN', password: 'ELECTION2020', role: 'viewer' },
@@ -50,7 +76,7 @@ const LOCAL_ACCOUNTS: Array<{ id: string; username: string; password: string; ro
   { id: 'u6', username: 'Arizona', password: 'ELECTION2020', role: 'viewer' },
   { id: 'u7', username: 'Wisconsin', password: 'ELECTION2020', role: 'viewer' },
   { id: 'u8', username: 'Nevada', password: 'ELECTION2020', role: 'viewer' },
-  { id: 'u9', username: 'North Carolina', password: 'ELECTION2020', role: 'viewer' },
+  { id: 'u9', username: 'NorthCarolina', password: 'ELECTION2020', role: 'viewer' },
   { id: 'u10', username: 'Democratic', password: 'ELECTION2020', role: 'viewer' },
   { id: 'u11', username: 'Republican', password: 'ELECTION2020', role: 'viewer' }
 ];
@@ -93,9 +119,24 @@ const calculateStateOverallTension = (crises: Crisis[]): TensionLevel => {
   return '较低';
 };
 
-const Logo = ({ className, style }: { className?: string, style?: React.CSSProperties }) => (
-  <div className={`font-serif font-black tracking-tighter ${className}`} style={{ fontSize: '1.75rem', lineHeight: 1, ...style }}>
-    SAMUN
+const Logo = ({
+  className,
+  style,
+  iconSize = 48
+}: {
+  className?: string;
+  style?: React.CSSProperties;
+  iconSize?: number;
+}) => (
+  <div className={`inline-flex items-center gap-2 font-serif font-black tracking-tighter ${className}`} style={{ fontSize: '1.75rem', lineHeight: 1, ...style }}>
+    <img
+      src="/samun-logo.png"
+      alt="SAMUN logo"
+      width={iconSize}
+      height={iconSize}
+      className="shrink-0 object-contain"
+    />
+    <span>SAMUN</span>
   </div>
 );
 
@@ -104,20 +145,24 @@ const CrisisCard = ({
   isAdmin, 
   onUpdateTension,
   onDelete,
-  onEdit
+  onEdit,
+  onOpenDetail
 }: { 
-  crisis: Crisis; 
+  crisis: CrisisBase; 
   isAdmin: boolean; 
   onUpdateTension: (id: string, tension: TensionLevel) => void;
   onDelete: (id: string) => void;
-  onEdit: (crisis: Crisis) => void;
+  onEdit: (crisis: CrisisBase) => void;
+  onOpenDetail: (crisis: CrisisBase) => void;
   key?: string | number 
 }) => {
   const isCritical = crisis.tension === '极高';
   
   return (
     <div className={`relative p-5 rounded-xl bg-[#131B2F] border transition-all duration-300 overflow-hidden group flex flex-col
-      ${isCritical ? 'border-[#A34A51]/50 shadow-[0_0_20px_rgba(163,74,81,0.15)]' : 'border-white/5 hover:border-white/20'}`}>
+      ${isCritical ? 'border-[#A34A51]/50 shadow-[0_0_20px_rgba(163,74,81,0.15)]' : 'border-white/5 hover:border-white/20'} cursor-pointer`}
+      onClick={() => onOpenDetail(crisis)}
+    >
       
       {isCritical && (
         <div className="absolute top-0 left-0 w-1 h-full bg-[#A34A51]"></div>
@@ -126,7 +171,10 @@ const CrisisCard = ({
       {isAdmin && (
         <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-20">
           <button 
-            onClick={() => onEdit(crisis)}
+            onClick={(e) => {
+              e.stopPropagation();
+              onEdit(crisis);
+            }}
             className="p-1.5 rounded bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white transition-colors"
             title="编辑"
           >
@@ -157,6 +205,7 @@ const CrisisCard = ({
           <select 
             value={crisis.tension}
             onChange={(e) => onUpdateTension(crisis.id, e.target.value as TensionLevel)}
+            onClick={(e) => e.stopPropagation()}
             className={`px-2 py-1 rounded border text-[10px] font-bold outline-none cursor-pointer ${getTensionColor(crisis.tension)} mr-12`}
           >
             <option value="极高" className="bg-[#131B2F] text-[#A34A51]">极高</option>
@@ -201,6 +250,7 @@ export default function App() {
   const [showLoginBox, setShowLoginBox] = useState(false);
 
   const [statesData, setStatesData] = useState<StateData[]>([]);
+  const [nationalCrises, setNationalCrises] = useState<NationalCrisis[]>([]);
   const [activeStateId, setActiveStateId] = useState<string>('');
   const [isAddingCrisis, setIsAddingCrisis] = useState(false);
   const [editingCrisisId, setEditingCrisisId] = useState<string | null>(null);
@@ -212,8 +262,22 @@ export default function App() {
     trend: 'up' as 'up' | 'down' | 'stable'
   });
   const [displayDate, setDisplayDate] = useState<string>(getTodayIsoDate());
+  const [nationalTensionPercent, setNationalTensionPercent] = useState<number>(85);
+  const [nationalTensionInput, setNationalTensionInput] = useState<string>('85');
   const [isEditingDisplayDate, setIsEditingDisplayDate] = useState(false);
   const [dateInput, setDateInput] = useState<string>(getTodayIsoDate());
+  const [isAddingNationalCrisis, setIsAddingNationalCrisis] = useState(false);
+  const [editingNationalCrisisId, setEditingNationalCrisisId] = useState<string | null>(null);
+  const [isFrontPageCollapsed, setIsFrontPageCollapsed] = useState(false);
+  const [selectedCrisisDetail, setSelectedCrisisDetail] = useState<CrisisDetailModalData | null>(null);
+  const [nationalFormData, setNationalFormData] = useState({
+    time: '',
+    title: '',
+    details: '',
+    tension: '中等' as TensionLevel,
+    trend: 'up' as 'up' | 'down' | 'stable'
+  });
+  const [stateTensionInput, setStateTensionInput] = useState<string>('0');
 
   const formatCrisisTime = () => {
     const now = new Date();
@@ -250,10 +314,16 @@ export default function App() {
 
   const fetchData = async () => {
     try {
-      const [{ data: states, error: statesError }, { data: crises, error: crisesError }, { data: settings, error: settingsError }] = await Promise.all([
+      const [
+        { data: states, error: statesError },
+        { data: crises, error: crisesError },
+        { data: settings, error: settingsError },
+        { data: national, error: nationalError }
+      ] = await Promise.all([
         supabase.from('states').select('*'),
         supabase.from('crises').select('*'),
-        supabase.from('app_settings').select('display_date').eq('id', 1).maybeSingle()
+        supabase.from('app_settings').select('display_date, national_tension_percent').eq('id', 1).maybeSingle(),
+        supabase.from('national_crises').select('*')
       ]);
 
       if (statesError) {
@@ -265,19 +335,38 @@ export default function App() {
       if (settingsError) {
         throw settingsError;
       }
+      if (nationalError) {
+        throw nationalError;
+      }
 
       const grouped = (states || []).map((state: any) => {
         const stateCrises = ((crises || []).filter((c: any) => c.state_id === state.id) as Crisis[]);
+        const derivedOverall = calculateStateOverallTension(stateCrises);
         return {
           ...state,
-          overallTension: calculateStateOverallTension(stateCrises),
+          overallTension: derivedOverall,
+          tensionPercent: clampPercent(
+            typeof state.tension_percent === 'number' ? state.tension_percent : defaultPercentByLevel(derivedOverall)
+          ),
           crises: stateCrises
         };
-      }) as StateData[];
+      })
+        .sort((a: any, b: any) => {
+          if (b.tensionPercent !== a.tensionPercent) {
+            return b.tensionPercent - a.tensionPercent;
+          }
+          return b.electoralVotes - a.electoralVotes;
+        }) as StateData[];
 
       setStatesData(grouped);
+      setNationalCrises((national || []) as NationalCrisis[]);
       const currentDate = settings?.display_date || getTodayIsoDate();
       setDisplayDate(currentDate);
+      setNationalTensionPercent(
+        clampPercent(
+          typeof settings?.national_tension_percent === 'number' ? settings.national_tension_percent : 85
+        )
+      );
       if (!isEditingDisplayDate) {
         setDateInput(currentDate);
       }
@@ -305,6 +394,9 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'app_settings' }, () => {
         fetchData();
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'national_crises' }, () => {
+        fetchData();
+      })
       .subscribe();
 
     return () => {
@@ -327,6 +419,29 @@ export default function App() {
     } catch (err) {
       console.error('Failed to update display date', err);
       alert('更新日期失败，请稍后重试。');
+    }
+  };
+
+  const handleUpdateNationalTensionPercent = async (value: number) => {
+    const nextValue = clampPercent(value);
+    try {
+      const { error } = await supabase
+        .from('app_settings')
+        .upsert(
+          {
+            id: 1,
+            display_date: displayDate || getTodayIsoDate(),
+            national_tension_percent: nextValue
+          },
+          { onConflict: 'id' }
+        );
+      if (error) {
+        throw error;
+      }
+      setNationalTensionPercent(nextValue);
+    } catch (err) {
+      console.error('Failed to update national tension percent', err);
+      alert('更新全国紧张度失败，请稍后重试。');
     }
   };
 
@@ -364,6 +479,79 @@ export default function App() {
     }
   };
 
+  const handleDeleteNationalCrisis = async (id: string) => {
+    try {
+      const { error } = await supabase
+        .from('national_crises')
+        .delete()
+        .eq('id', id);
+      if (error) {
+        throw error;
+      }
+      fetchData();
+    } catch (err) {
+      console.error('Failed to delete national crisis', err);
+    }
+  };
+
+  const handleUpdateNationalTension = async (id: string, tension: TensionLevel) => {
+    try {
+      const { error } = await supabase
+        .from('national_crises')
+        .update({ tension })
+        .eq('id', id);
+      if (error) {
+        throw error;
+      }
+      fetchData();
+    } catch (err) {
+      console.error('Failed to update national tension', err);
+    }
+  };
+
+  const handleUpdateStateTensionPercent = async (stateId: string, value: number) => {
+    const nextValue = clampPercent(value);
+    try {
+      const { error } = await supabase
+        .from('states')
+        .update({ tension_percent: nextValue })
+        .eq('id', stateId);
+      if (error) {
+        throw error;
+      }
+      setStatesData((prev) =>
+        prev.map((state) => (state.id === stateId ? { ...state, tensionPercent: nextValue } : state))
+      );
+    } catch (err) {
+      console.error('Failed to update state tension percent', err);
+      alert('更新州紧张度失败，请稍后重试。');
+    }
+  };
+
+  const openStateCrisisDetail = (crisis: CrisisBase) => {
+    setSelectedCrisisDetail({
+      ...crisis,
+      scopeLabel: activeState?.stateName || '州级危机'
+    });
+  };
+
+  const openNationalCrisisDetail = (crisis: CrisisBase) => {
+    setSelectedCrisisDetail({
+      ...crisis,
+      scopeLabel: '头版新闻'
+    });
+  };
+
+  useEffect(() => {
+    setNationalTensionInput(String(nationalTensionPercent));
+  }, [nationalTensionPercent]);
+
+  useEffect(() => {
+    if (activeState) {
+      setStateTensionInput(String(activeState.tensionPercent));
+    }
+  }, [activeStateId, activeState?.tensionPercent]);
+
   const openEditForm = (crisis: Crisis) => {
     setEditingCrisisId(crisis.id);
     setFormData({
@@ -385,6 +573,29 @@ export default function App() {
   const closeForm = () => {
     setIsAddingCrisis(false);
     setEditingCrisisId(null);
+  };
+
+  const openEditNationalForm = (crisis: NationalCrisis) => {
+    setEditingNationalCrisisId(crisis.id);
+    setNationalFormData({
+      time: crisis.time,
+      title: crisis.title,
+      details: crisis.details,
+      tension: crisis.tension,
+      trend: crisis.trend
+    });
+    setIsAddingNationalCrisis(true);
+  };
+
+  const openAddNationalForm = () => {
+    setEditingNationalCrisisId(null);
+    setNationalFormData({ time: formatCrisisTime(), title: '', details: '', tension: '中等', trend: 'up' });
+    setIsAddingNationalCrisis(true);
+  };
+
+  const closeNationalForm = () => {
+    setIsAddingNationalCrisis(false);
+    setEditingNationalCrisisId(null);
   };
 
   const handleSubmitForm = async (e: React.FormEvent) => {
@@ -414,6 +625,35 @@ export default function App() {
       fetchData();
     } catch (err) {
       console.error('Failed to save crisis', err);
+    }
+  };
+
+  const handleSubmitNationalForm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      if (editingNationalCrisisId) {
+        const { error } = await supabase
+          .from('national_crises')
+          .update(nationalFormData)
+          .eq('id', editingNationalCrisisId);
+        if (error) {
+          throw error;
+        }
+      } else {
+        const { error } = await supabase
+          .from('national_crises')
+          .insert({
+            id: `nat-${Date.now()}`,
+            ...nationalFormData
+          });
+        if (error) {
+          throw error;
+        }
+      }
+      closeNationalForm();
+      fetchData();
+    } catch (err) {
+      console.error('Failed to save national crisis', err);
     }
   };
 
@@ -504,7 +744,7 @@ export default function App() {
             </div>
             
             <div className="mb-8 border-b border-white/10 pb-6 flex justify-center">
-              <Logo className="text-white" style={{ fontSize: '3.5rem' }} />
+              <Logo className="text-white" style={{ fontSize: '3.5rem' }} iconSize={60} />
             </div>
 
             <form onSubmit={handleLogin} className="space-y-6 relative z-10">
@@ -629,6 +869,37 @@ export default function App() {
               <div className="text-xs text-[#A34A51] mt-1 flex items-center gap-1 font-mono">
                 <Clock size={12} /> {displayDate}
               </div>
+              <div className="mt-3">
+                <div className="flex items-center justify-between text-[11px] font-mono text-gray-400 mb-1">
+                  <span>NATIONAL TENSION</span>
+                  <span className="text-[#A34A51] font-bold">{nationalTensionPercent}%</span>
+                </div>
+                <div className="w-48 h-2 rounded-full bg-white/10 overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-[#D97757] to-[#A34A51] transition-all duration-300"
+                    style={{ width: `${nationalTensionPercent}%` }}
+                  ></div>
+                </div>
+                {isAdmin && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      value={nationalTensionInput}
+                      onChange={(e) => setNationalTensionInput(e.target.value)}
+                      className="w-20 bg-[#0B0F19] border border-white/15 rounded px-2 py-1 text-xs text-white outline-none focus:border-[#A34A51]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleUpdateNationalTensionPercent(Number(nationalTensionInput))}
+                      className="text-xs px-2.5 py-1 rounded border border-[#A34A51]/50 text-[#A34A51] hover:bg-[#A34A51] hover:text-white transition-colors"
+                    >
+                      保存
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
             {isAdmin && (
               <div className="absolute right-4 top-4">
@@ -675,6 +946,154 @@ export default function App() {
           </div>
         </div>
 
+        {/* Front Page News Board */}
+        <section className="mb-10">
+          <div className="bg-[#131B2F] border border-[#A34A51]/30 rounded-2xl p-6 shadow-[0_0_30px_rgba(163,74,81,0.12)]">
+            <div className="flex items-center justify-between mb-5">
+              <div>
+                <h3 className="text-2xl font-serif font-bold text-white">头版新闻</h3>
+                <p className="text-xs text-gray-400 font-mono uppercase tracking-widest mt-1">Front Page News Feed</p>
+              </div>
+              <div className="flex items-center gap-2">
+                {isAdmin && !isAddingNationalCrisis && !isFrontPageCollapsed && (
+                  <button
+                    onClick={openAddNationalForm}
+                    className="px-3 py-2 rounded-lg border border-[#A34A51] text-[#A34A51] hover:bg-[#A34A51] hover:text-white transition-colors flex items-center gap-2 text-sm font-bold"
+                  >
+                    <Plus size={16} />
+                    添加全国危机
+                  </button>
+                )}
+                <button
+                  onClick={() => setIsFrontPageCollapsed((v) => !v)}
+                  className="px-3 py-2 rounded-lg border border-white/15 text-gray-300 hover:text-white hover:border-white/35 transition-colors flex items-center gap-2 text-sm font-bold"
+                  title={isFrontPageCollapsed ? '展开头版新闻' : '折叠头版新闻'}
+                >
+                  {isFrontPageCollapsed ? '展开' : '折叠'}
+                  <ChevronRight size={16} className={`transition-transform ${isFrontPageCollapsed ? '-rotate-90' : 'rotate-90'}`} />
+                </button>
+              </div>
+            </div>
+
+            {!isFrontPageCollapsed && nationalCrises.length > 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                {nationalCrises.map(crisis => (
+                  <CrisisCard
+                    key={crisis.id}
+                    crisis={crisis}
+                    isAdmin={isAdmin}
+                    onUpdateTension={handleUpdateNationalTension}
+                    onDelete={handleDeleteNationalCrisis}
+                    onEdit={(c) => openEditNationalForm(c as NationalCrisis)}
+                    onOpenDetail={openNationalCrisisDetail}
+                  />
+                ))}
+              </div>
+            ) : !isFrontPageCollapsed ? (
+              <div className="border border-dashed border-white/15 rounded-xl p-8 text-center text-gray-500 font-mono text-sm">
+                暂无全国性危机事件
+              </div>
+            ) : (
+              <div className="text-xs text-gray-500 font-mono">已折叠，点击右上角“展开”查看内容。</div>
+            )}
+          </div>
+        </section>
+
+        {/* Admin Add/Edit National Crisis Form */}
+        {isAdmin && isAddingNationalCrisis && !isFrontPageCollapsed && (
+          <form onSubmit={handleSubmitNationalForm} className="bg-[#131B2F] border border-[#A34A51] rounded-2xl p-6 mb-10 shadow-[0_0_30px_rgba(163,74,81,0.2)] relative z-10">
+            <div className="flex justify-between items-center mb-6">
+              <h4 className="text-lg font-bold text-white flex items-center gap-2">
+                {editingNationalCrisisId ? <Edit2 size={18} className="text-[#A34A51]" /> : <Plus size={18} className="text-[#A34A51]" />}
+                {editingNationalCrisisId ? '编辑全国危机事件' : '添加全国危机事件'}
+              </h4>
+              <button type="button" onClick={closeNationalForm} className="text-gray-400 hover:text-white">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">危机标题</label>
+                <input
+                  required
+                  type="text"
+                  value={nationalFormData.title}
+                  onChange={e => setNationalFormData({ ...nationalFormData, title: e.target.value })}
+                  className="w-full bg-[#0B0F19] border border-white/10 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-[#A34A51]"
+                  placeholder="输入标题..."
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">紧张程度</label>
+                  <select
+                    value={nationalFormData.tension}
+                    onChange={e => setNationalFormData({ ...nationalFormData, tension: e.target.value as TensionLevel })}
+                    className="w-full bg-[#0B0F19] border border-white/10 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-[#A34A51]"
+                  >
+                    <option value="极高">极高</option>
+                    <option value="高">高</option>
+                    <option value="中等">中等</option>
+                    <option value="较低">较低</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">发展趋势</label>
+                  <select
+                    value={nationalFormData.trend}
+                    onChange={e => setNationalFormData({ ...nationalFormData, trend: e.target.value as 'up' | 'down' | 'stable' })}
+                    className="w-full bg-[#0B0F19] border border-white/10 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-[#A34A51]"
+                  >
+                    <option value="up">上升 (Up)</option>
+                    <option value="stable">平稳 (Stable)</option>
+                    <option value="down">下降 (Down)</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-xs text-gray-400 mb-1">事件时间</label>
+              <input
+                required
+                type="text"
+                value={nationalFormData.time}
+                onChange={e => setNationalFormData({ ...nationalFormData, time: e.target.value })}
+                className="w-full bg-[#0B0F19] border border-white/10 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-[#A34A51]"
+                placeholder="格式：MM-DD HH:mm（示例 11-04 14:15）"
+              />
+            </div>
+
+            <div className="mb-6">
+              <label className="block text-xs text-gray-400 mb-1">详细描述</label>
+              <textarea
+                required
+                value={nationalFormData.details}
+                onChange={e => setNationalFormData({ ...nationalFormData, details: e.target.value })}
+                className="w-full bg-[#0B0F19] border border-white/10 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-[#A34A51] h-24 resize-none"
+                placeholder="输入详细描述..."
+              />
+            </div>
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeNationalForm}
+                className="px-4 py-2 rounded-lg border border-white/10 text-gray-400 hover:text-white hover:bg-white/5 transition-colors text-sm"
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 rounded-lg bg-[#A34A51] text-white hover:bg-[#8A3A41] transition-colors text-sm font-bold flex items-center gap-2"
+              >
+                <Check size={16} />
+                {editingNationalCrisisId ? '保存修改' : '确认添加'}
+              </button>
+            </div>
+          </form>
+        )}
+
         {/* Dashboard Layout: Sidebar + Main Area */}
         <div className="flex flex-col lg:flex-row gap-8">
           {/* Sidebar: State Selector */}
@@ -693,7 +1112,7 @@ export default function App() {
                     : 'bg-[#131B2F] border-white/5 hover:border-white/20 hover:bg-[#1a243d]'
                   }`}
               >
-                <div>
+                <div className="flex-1 min-w-0 pr-3">
                   <div className="flex items-center gap-2 mb-1">
                     <span className={`font-serif font-bold text-lg ${activeStateId === state.id ? 'text-[#A34A51]' : 'text-white'}`}>
                       {state.stateName}
@@ -702,6 +1121,18 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-2 text-xs">
                     <span className="text-gray-400 font-mono">{state.electoralVotes} EV</span>
+                  </div>
+                  <div className="mt-2">
+                    <div className="flex items-center justify-between text-[10px] font-mono text-gray-500 mb-1">
+                      <span>STATE TENSION</span>
+                      <span className="text-[#A34A51] font-bold">{state.tensionPercent}%</span>
+                    </div>
+                    <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-[#D97757] to-[#A34A51] transition-all duration-300"
+                        style={{ width: `${state.tensionPercent}%` }}
+                      ></div>
+                    </div>
                   </div>
                 </div>
                 <ChevronRight size={18} className={`${activeStateId === state.id ? 'text-[#A34A51]' : 'text-gray-600 group-hover:text-gray-400'} transition-colors`} />
@@ -755,6 +1186,40 @@ export default function App() {
                 </div>
               </div>
             </div>
+
+            {isAdmin && (
+              <div className="bg-[#131B2F] border border-white/10 rounded-xl p-4 mb-6">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs text-gray-400 font-mono uppercase tracking-widest">
+                    {activeState.stateName} 州紧张度
+                  </span>
+                  <span className="text-sm font-mono font-bold text-[#A34A51]">{activeState.tensionPercent}%</span>
+                </div>
+                <div className="w-full h-2 rounded-full bg-white/10 overflow-hidden mb-2">
+                  <div
+                    className="h-full bg-gradient-to-r from-[#D97757] to-[#A34A51] transition-all duration-300"
+                    style={{ width: `${activeState.tensionPercent}%` }}
+                  ></div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={stateTensionInput}
+                    onChange={(e) => setStateTensionInput(e.target.value)}
+                    className="w-24 bg-[#0B0F19] border border-white/15 rounded px-2 py-1 text-xs text-white outline-none focus:border-[#A34A51]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateStateTensionPercent(activeState.id, Number(stateTensionInput))}
+                    className="text-xs px-2.5 py-1 rounded border border-[#A34A51]/50 text-[#A34A51] hover:bg-[#A34A51] hover:text-white transition-colors"
+                  >
+                    保存
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Admin Add/Edit Crisis Form */}
             {isAdmin && isAddingCrisis && (
@@ -859,12 +1324,64 @@ export default function App() {
                   onUpdateTension={handleUpdateTension}
                   onDelete={handleDeleteCrisis}
                   onEdit={openEditForm}
+                  onOpenDetail={openStateCrisisDetail}
                 />
               ))}
             </div>
           </div>
         </div>
       </main>
+
+      {selectedCrisisDetail && (
+        <div
+          className="fixed inset-0 z-[120] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setSelectedCrisisDetail(null)}
+        >
+          <div
+            className="w-full max-w-2xl bg-[#131B2F] border border-[#A34A51]/50 rounded-2xl shadow-[0_0_60px_rgba(163,74,81,0.25)] overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-5 border-b border-white/10 flex items-start justify-between gap-4">
+              <div>
+                <div className="text-[11px] text-gray-400 font-mono uppercase tracking-widest mb-2">
+                  {selectedCrisisDetail.scopeLabel}
+                </div>
+                <h4 className="text-xl font-serif font-bold text-white leading-snug">
+                  {selectedCrisisDetail.title}
+                </h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedCrisisDetail(null)}
+                className="text-gray-400 hover:text-white transition-colors"
+                title="关闭"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="flex items-center gap-3 text-xs font-mono text-gray-400">
+                <span className="inline-flex items-center gap-1.5 bg-black/30 px-2 py-1 rounded">
+                  <Clock size={12} />
+                  {selectedCrisisDetail.time}
+                </span>
+                <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded border ${getTensionColor(selectedCrisisDetail.tension)}`}>
+                  {selectedCrisisDetail.tension}
+                </span>
+                <span className="inline-flex items-center gap-1.5 bg-white/5 px-2 py-1 rounded">
+                  TREND
+                  {selectedCrisisDetail.trend === 'up' && <TrendingUp size={12} className="text-[#A34A51]" />}
+                  {selectedCrisisDetail.trend === 'down' && <TrendingUp size={12} className="text-green-500 rotate-180" />}
+                  {selectedCrisisDetail.trend === 'stable' && <Activity size={12} className="text-gray-400" />}
+                </span>
+              </div>
+              <div className="text-sm leading-relaxed text-gray-200 whitespace-pre-wrap">
+                {selectedCrisisDetail.details}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
