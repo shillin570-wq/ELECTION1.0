@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Activity, ShieldAlert, TrendingUp, ChevronRight, Clock, Plus, Edit2, Trash2, X, Check, LogOut } from 'lucide-react';
+import { Activity, ShieldAlert, TrendingUp, ChevronRight, Clock, Plus, Edit2, Trash2, X, Check, LogOut, Sparkles, AlertTriangle } from 'lucide-react';
 import { motion } from 'motion/react';
 import { supabase } from './supabase';
 
@@ -12,6 +12,8 @@ interface CrisisBase {
   details: string;
   tension: TensionLevel;
   trend: 'up' | 'down' | 'stable';
+  created_at?: string;
+  updated_at?: string;
 }
 
 interface Crisis extends CrisisBase {
@@ -65,6 +67,12 @@ const defaultPercentByLevel = (level: TensionLevel) => {
     default:
       return 30;
   }
+};
+
+const toEpoch = (value?: string) => {
+  if (!value) return 0;
+  const t = new Date(value).getTime();
+  return Number.isNaN(t) ? 0 : t;
 };
 
 const LOCAL_ACCOUNTS: Array<{ id: string; username: string; password: string; role: 'admin' | 'viewer' }> = [
@@ -157,13 +165,31 @@ const CrisisCard = ({
   key?: string | number 
 }) => {
   const isCritical = crisis.tension === '极高';
+  const [hasClicked, setHasClicked] = useState(false);
+  const createdAt = toEpoch(crisis.created_at);
+  const updatedAt = toEpoch(crisis.updated_at);
+  const now = Date.now();
+  const isRecentlyCreated = createdAt > 0 && now - createdAt <= 10 * 60 * 1000;
+  const isRecentlyUpdated = updatedAt > 0 && updatedAt > createdAt && now - updatedAt <= 10 * 60 * 1000;
+  const shouldHighlightNewCard = isRecentlyCreated;
+  const shouldPulseNewCard = shouldHighlightNewCard && !hasClicked;
   
   return (
-    <div className={`relative p-5 rounded-xl bg-[#131B2F] border transition-all duration-300 overflow-hidden group flex flex-col
-      ${isCritical ? 'border-[#A34A51]/50 shadow-[0_0_20px_rgba(163,74,81,0.15)]' : 'border-white/5 hover:border-white/20'} cursor-pointer`}
-      onClick={() => onOpenDetail(crisis)}
+    <div className={`relative p-5 rounded-xl border transition-all duration-300 overflow-hidden group flex flex-col
+      ${
+        shouldHighlightNewCard
+          ? 'bg-[#1A1520] border-[#A34A51]/60 shadow-[0_0_0_1px_rgba(163,74,81,0.18),0_8px_20px_rgba(0,0,0,0.25)] hover:border-[#A34A51]/80'
+          : `bg-[#131B2F] ${isCritical ? 'border-[#A34A51]/50 shadow-[0_0_20px_rgba(163,74,81,0.15)]' : 'border-white/5 hover:border-white/20'}`
+      } cursor-pointer`}
+      onClick={() => {
+        setHasClicked(true);
+        onOpenDetail(crisis);
+      }}
     >
-      
+      {shouldHighlightNewCard && (
+        <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-[#7F343B]/70 via-[#A34A51]/70 to-[#7F343B]/70"></div>
+      )}
+
       {isCritical && (
         <div className="absolute top-0 left-0 w-1 h-full bg-[#A34A51]"></div>
       )}
@@ -183,9 +209,7 @@ const CrisisCard = ({
           <button 
             onClick={(e) => {
               e.stopPropagation();
-              if(window.confirm('确定要删除这个危机事件吗？')) {
-                onDelete(crisis.id);
-              }
+              onDelete(crisis.id);
             }}
             className="p-1.5 rounded bg-red-500/10 hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors"
             title="删除"
@@ -200,6 +224,24 @@ const CrisisCard = ({
           <Clock size={12} />
           {crisis.time}
         </div>
+        {(isRecentlyCreated || isRecentlyUpdated) && (
+          <div
+            className={`text-[10px] font-bold px-2 py-1 rounded border ${
+              isRecentlyCreated
+                ? 'text-[#F1C9CF] border-[#A34A51]/60 bg-[#2A1A23]'
+                : 'text-[#D97757] border-[#D97757]/50 bg-[#D97757]/10'
+            }`}
+          >
+            {isRecentlyCreated ? (
+              <span className="inline-flex items-center gap-1 tracking-wide">
+                <Sparkles size={11} />
+                NEW 新增危机
+              </span>
+            ) : (
+              '更新危机'
+            )}
+          </div>
+        )}
         
         {isAdmin ? (
           <select 
@@ -270,6 +312,7 @@ export default function App() {
   const [editingNationalCrisisId, setEditingNationalCrisisId] = useState<string | null>(null);
   const [isFrontPageCollapsed, setIsFrontPageCollapsed] = useState(false);
   const [selectedCrisisDetail, setSelectedCrisisDetail] = useState<CrisisDetailModalData | null>(null);
+  const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<{ id: string; scope: 'state' | 'national' } | null>(null);
   const [nationalFormData, setNationalFormData] = useState({
     time: '',
     title: '',
@@ -340,7 +383,15 @@ export default function App() {
       }
 
       const grouped = (states || []).map((state: any) => {
-        const stateCrises = ((crises || []).filter((c: any) => c.state_id === state.id) as Crisis[]);
+        const stateCrises = ((crises || []).filter((c: any) => c.state_id === state.id) as Crisis[])
+          .sort((a, b) => {
+            const aSort = Math.max(toEpoch(a.updated_at), toEpoch(a.created_at));
+            const bSort = Math.max(toEpoch(b.updated_at), toEpoch(b.created_at));
+            if (bSort !== aSort) {
+              return bSort - aSort;
+            }
+            return b.id.localeCompare(a.id);
+          });
         const derivedOverall = calculateStateOverallTension(stateCrises);
         return {
           ...state,
@@ -359,7 +410,16 @@ export default function App() {
         }) as StateData[];
 
       setStatesData(grouped);
-      setNationalCrises((national || []) as NationalCrisis[]);
+      setNationalCrises(
+        ((national || []) as NationalCrisis[]).sort((a, b) => {
+          const aSort = Math.max(toEpoch(a.updated_at), toEpoch(a.created_at));
+          const bSort = Math.max(toEpoch(b.updated_at), toEpoch(b.created_at));
+          if (bSort !== aSort) {
+            return bSort - aSort;
+          }
+          return b.id.localeCompare(a.id);
+        })
+      );
       const currentDate = settings?.display_date || getTodayIsoDate();
       setDisplayDate(currentDate);
       setNationalTensionPercent(
@@ -492,6 +552,27 @@ export default function App() {
     } catch (err) {
       console.error('Failed to delete national crisis', err);
     }
+  };
+
+  const requestDeleteCrisis = (id: string) => {
+    setDeleteConfirmTarget({ id, scope: 'state' });
+  };
+
+  const requestDeleteNationalCrisis = (id: string) => {
+    setDeleteConfirmTarget({ id, scope: 'national' });
+  };
+
+  const confirmDeleteTarget = async () => {
+    if (!deleteConfirmTarget) {
+      return;
+    }
+    const { id, scope } = deleteConfirmTarget;
+    if (scope === 'state') {
+      await handleDeleteCrisis(id);
+    } else {
+      await handleDeleteNationalCrisis(id);
+    }
+    setDeleteConfirmTarget(null);
   };
 
   const handleUpdateNationalTension = async (id: string, tension: TensionLevel) => {
@@ -983,7 +1064,7 @@ export default function App() {
                     crisis={crisis}
                     isAdmin={isAdmin}
                     onUpdateTension={handleUpdateNationalTension}
-                    onDelete={handleDeleteNationalCrisis}
+                    onDelete={requestDeleteNationalCrisis}
                     onEdit={(c) => openEditNationalForm(c as NationalCrisis)}
                     onOpenDetail={openNationalCrisisDetail}
                   />
@@ -1322,7 +1403,7 @@ export default function App() {
                   crisis={crisis} 
                   isAdmin={isAdmin} 
                   onUpdateTension={handleUpdateTension}
-                  onDelete={handleDeleteCrisis}
+                  onDelete={requestDeleteCrisis}
                   onEdit={openEditForm}
                   onOpenDetail={openStateCrisisDetail}
                 />
@@ -1378,6 +1459,49 @@ export default function App() {
               <div className="text-sm leading-relaxed text-gray-200 whitespace-pre-wrap">
                 {selectedCrisisDetail.details}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteConfirmTarget && (
+        <div
+          className="fixed inset-0 z-[130] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setDeleteConfirmTarget(null)}
+        >
+          <div
+            className="w-full max-w-md bg-[#131B2F] border border-[#A34A51]/45 rounded-2xl shadow-[0_0_40px_rgba(163,74,81,0.18)] overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-white/10 flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-[#A34A51]/15 border border-[#A34A51]/40 flex items-center justify-center text-[#D9878E]">
+                <AlertTriangle size={18} />
+              </div>
+              <div>
+                <h4 className="text-white font-bold">确认删除</h4>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  {deleteConfirmTarget.scope === 'national' ? '头版新闻危机' : '州危机'}删除后无法恢复
+                </p>
+              </div>
+            </div>
+            <div className="px-5 py-4 text-sm text-gray-300 leading-relaxed">
+              你确定要删除这条信息吗？此操作会立即同步给所有在线用户。
+            </div>
+            <div className="px-5 py-4 border-t border-white/10 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmTarget(null)}
+                className="px-4 py-2 rounded-lg border border-white/15 text-gray-300 hover:text-white hover:border-white/35 transition-colors text-sm font-bold"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={confirmDeleteTarget}
+                className="px-4 py-2 rounded-lg bg-[#A34A51] text-white hover:bg-[#8A3A41] transition-colors text-sm font-bold"
+              >
+                确认删除
+              </button>
             </div>
           </div>
         </div>
