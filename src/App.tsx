@@ -46,13 +46,15 @@ const TABLE_FETCH_LIMIT = 1000;
 /** 头版轮播每屏条数 */
 const FRONT_PAGE_PAGE_SIZE = 3;
 
-/** 竖向翻屏：满三条时固定视口高度 */
-const FRONT_PAGE_CAROUSEL_VIEWPORT_CLASS =
-  'h-[min(40rem,calc(100svh-9.5rem))] sm:h-[min(44rem,calc(100svh-8.5rem))] lg:h-[min(46rem,calc(100svh-8rem))]';
+/** 三条及以上：固定视口高度，一屏始终显示 3 条，超出部分竖向滚轮翻屏 */
+const FRONT_PAGE_CAROUSEL_VIEWPORT_FIXED_CLASS =
+  'h-[min(19rem,calc(100svh-10.5rem))] sm:h-[min(21rem,calc(100svh-10rem))] lg:h-[min(22.5rem,calc(100svh-9.5rem))] shrink-0';
 
-/** 仅一条或两条时：总高度随内容，但不超过与满屏相同的最大高度 */
+/** 不足三条：总高度随内容，并限制最大高度 */
 const FRONT_PAGE_CAROUSEL_MAX_H_CLASS =
   'max-h-[min(40rem,calc(100svh-9.5rem))] sm:max-h-[min(44rem,calc(100svh-8.5rem))] lg:max-h-[min(46rem,calc(100svh-8rem))]';
+
+const FRONT_PAGE_CAROUSEL_SCROLL_SHORT_CLASS = `${FRONT_PAGE_CAROUSEL_MAX_H_CLASS} h-auto min-h-0`;
 
 const chunkArray = <T,>(arr: T[], size: number): T[][] => {
   if (size < 1) {
@@ -741,6 +743,8 @@ interface FrontPageNewsRowProps {
   variant?: 'default' | 'carouselTile';
   /** 竖向三槽轮播内：与默认行样式相同，略压缩内边距以便一屏三条 */
   slotInPage?: boolean;
+  /** 满三槽屏时拉满单行高度（与 flex-1 槽位配合） */
+  fillSlotHeight?: boolean;
 }
 
 function FrontPageNewsRow({
@@ -751,7 +755,8 @@ function FrontPageNewsRow({
   onEdit,
   onOpenDetail,
   variant = 'default',
-  slotInPage = false
+  slotInPage = false,
+  fillSlotHeight = false
 }: FrontPageNewsRowProps) {
   const isCritical = crisis.tension === '极高';
   const createdAt = toEpoch(crisis.created_at);
@@ -796,7 +801,9 @@ function FrontPageNewsRow({
   if (slotInPage) {
     return (
       <div
-        className={`group relative flex h-full min-h-0 w-full flex-row items-stretch gap-3 rounded-xl border px-3 py-2.5 transition-colors sm:gap-4 sm:px-4 sm:py-3 ${
+        className={`group relative flex w-full flex-row items-stretch gap-2.5 rounded-xl border px-2.5 py-2 transition-colors sm:gap-3 sm:px-3 sm:py-2 ${
+          fillSlotHeight ? 'h-full min-h-0 overflow-hidden' : ''
+        } ${
           isCritical
             ? 'cursor-pointer border-[#A34A51]/45 bg-[#120a0e] shadow-[inset_0_0_0_1px_rgba(163,74,81,0.12)] hover:border-[#A34A51]/55'
             : 'cursor-pointer border-[#D4AF37]/22 bg-[#090c14] hover:border-[#D4AF37]/38 hover:bg-[#0c1018]'
@@ -804,13 +811,13 @@ function FrontPageNewsRow({
         onClick={() => onOpenDetail(crisis)}
       >
         {adminOverlay}
-        <div className="flex w-[22%] min-w-[5.25rem] max-w-[6.75rem] shrink-0 flex-col gap-2 border-r border-white/[0.07] pr-2.5 sm:max-w-[7rem] sm:pr-3">
-          <div className="flex items-center gap-1.5 text-[10px] font-mono font-semibold uppercase tracking-[0.14em] text-[#D4AF37]">
-            <Newspaper size={13} className="shrink-0 opacity-90" strokeWidth={2} />
+        <div className="flex w-[22%] min-w-[5rem] max-w-[6.5rem] shrink-0 flex-col gap-1.5 border-r border-white/[0.07] pr-2 sm:max-w-[6.75rem] sm:pr-2.5">
+          <div className="flex items-center gap-1 text-[9px] font-mono font-semibold uppercase tracking-[0.12em] text-[#D4AF37] sm:text-[10px]">
+            <Newspaper size={12} className="shrink-0 opacity-90 sm:w-[13px] sm:h-[13px]" strokeWidth={2} />
             <span>HEADLINE</span>
           </div>
-          <div className="flex w-fit items-center gap-1 rounded-md bg-black/35 px-2 py-1 font-mono text-[11px] text-gray-300">
-            <Clock size={12} className="shrink-0 opacity-80" />
+          <div className="flex w-fit items-center gap-1 rounded-md bg-black/35 px-1.5 py-0.5 font-mono text-[10px] text-gray-300 sm:px-2 sm:py-1 sm:text-[11px]">
+            <Clock size={11} className="shrink-0 opacity-80 sm:h-3 sm:w-3" />
             {crisis.time}
           </div>
           {(isRecentlyCreated || isRecentlyUpdated) && (
@@ -825,26 +832,30 @@ function FrontPageNewsRow({
             </div>
           )}
         </div>
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col justify-between gap-2 pr-1">
-          <div className="min-h-0">
+        <div
+          className={`flex min-h-0 min-w-0 flex-1 flex-col pr-0.5 sm:pr-1 ${
+            fillSlotHeight ? 'min-h-0 justify-between gap-1' : 'gap-1.5'
+          }`}
+        >
+          <div className={`min-h-0 ${fillSlotHeight ? 'shrink-0 overflow-hidden' : ''}`}>
             <h4
-              className={`font-serif text-[0.95rem] font-bold leading-snug tracking-tight line-clamp-2 sm:text-[1.05rem] ${
+              className={`line-clamp-2 font-serif text-[0.88rem] font-bold leading-tight tracking-tight sm:text-[0.92rem] ${
                 isCritical ? 'text-[#E8A8AD]' : 'text-[#F5F2EC]'
               }`}
             >
               {crisis.title}
             </h4>
-            <p className="mt-1.5 line-clamp-2 text-xs leading-relaxed text-gray-300/95 sm:text-[13px] font-sans">
+            <p className="mt-1 line-clamp-2 font-sans text-[11px] leading-snug text-gray-300/95 sm:text-xs">
               {crisis.details}
             </p>
             {showFrontPageDetailHint ? (
-              <p className="mt-1.5 flex items-center gap-0.5 text-[10px] font-mono font-semibold tracking-wide text-[#D4AF37]/95">
-                <ChevronRight size={12} strokeWidth={2.5} className="opacity-90" aria-hidden />
+              <p className="mt-1 flex items-center gap-0.5 text-[9px] font-mono font-semibold tracking-wide text-[#D4AF37]/95 sm:text-[10px]">
+                <ChevronRight size={11} strokeWidth={2.5} className="opacity-90 sm:h-3 sm:w-3" aria-hidden />
                 点击查看详情
               </p>
             ) : null}
           </div>
-          <div className="flex flex-wrap items-center gap-2 border-t border-white/[0.06] pt-2">
+          <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-white/[0.06] pt-1.5 sm:gap-2">
             {isAdmin ? (
               <select
                 value={crisis.tension}
@@ -2070,12 +2081,10 @@ export default function App() {
             {!isFrontPageCollapsed && nationalCrises.length > 0 ? (
               <div className="relative pb-1">
                 {(() => {
-                  const singlePageOnly = frontPagePages.length === 1;
-                  const fewerThanThreeTotal = nationalCrises.length < FRONT_PAGE_PAGE_SIZE;
-                  const scrollAreaClass =
-                    singlePageOnly && fewerThanThreeTotal
-                      ? `${FRONT_PAGE_CAROUSEL_MAX_H_CLASS} h-auto min-h-0`
-                      : FRONT_PAGE_CAROUSEL_VIEWPORT_CLASS;
+                  const useFixedThreeViewport = nationalCrises.length >= FRONT_PAGE_PAGE_SIZE;
+                  const scrollAreaClass = useFixedThreeViewport
+                    ? FRONT_PAGE_CAROUSEL_VIEWPORT_FIXED_CLASS
+                    : FRONT_PAGE_CAROUSEL_SCROLL_SHORT_CLASS;
                   return (
                 <div
                   ref={frontPageCarouselRef}
@@ -2103,19 +2112,23 @@ export default function App() {
                 >
                   <LayoutGroup id="national-front-page-crises">
                     {frontPagePages.map((page, pageIndex) => {
-                      const fullSlot = page.length === FRONT_PAGE_PAGE_SIZE;
+                      const fullPage = page.length === FRONT_PAGE_PAGE_SIZE;
                       return (
                       <div
                         key={`fp-page-${pageIndex}`}
                         data-fp-page
-                        className={`flex shrink-0 snap-start flex-col gap-2.5 overflow-hidden box-border px-2 py-2 sm:gap-3 sm:px-3 sm:py-3 ${
-                          fullSlot ? FRONT_PAGE_CAROUSEL_VIEWPORT_CLASS : 'h-auto min-h-0'
+                        className={`flex shrink-0 snap-start flex-col overflow-hidden box-border px-2 py-2 sm:gap-2.5 sm:px-2.5 sm:py-2.5 ${
+                          fullPage && nationalCrises.length >= FRONT_PAGE_PAGE_SIZE
+                            ? 'min-h-full h-full gap-2 sm:gap-2.5'
+                            : 'h-auto min-h-0 gap-2 sm:gap-2.5'
                         }`}
                         style={{ perspective: '1400px' }}
                       >
                         <AnimatePresence initial={false} mode="popLayout">
                           {page.map((crisis, index) => {
                             const brickIndex = pageIndex * FRONT_PAGE_PAGE_SIZE + index;
+                            const fillSlot =
+                              fullPage && nationalCrises.length >= FRONT_PAGE_PAGE_SIZE;
                             return (
                               <motion.div
                                 key={crisis.id}
@@ -2125,12 +2138,15 @@ export default function App() {
                                 exit={crisisBrickExit}
                                 transition={crisisBrickTransition}
                                 style={{ transformOrigin: '50% 100%' }}
-                                className={`flex min-h-0 min-w-0 flex-col ${fullSlot ? 'flex-1' : 'flex-none'}`}
+                                className={`flex min-h-0 min-w-0 flex-col ${
+                                  fillSlot ? 'min-h-0 flex-1' : 'flex-none'
+                                }`}
                               >
                                 <FrontPageNewsRow
                                   crisis={crisis}
                                   isAdmin={isAdmin}
                                   slotInPage
+                                  fillSlotHeight={fillSlot}
                                   onUpdateTension={handleUpdateNationalTension}
                                   onDelete={requestDeleteNationalCrisis}
                                   onEdit={openEditNationalForm}
