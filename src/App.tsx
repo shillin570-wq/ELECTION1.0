@@ -1,9 +1,38 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Activity, ShieldAlert, TrendingUp, ChevronRight, Clock, Plus, Edit2, Trash2, X, Check, LogOut, Sparkles, AlertTriangle } from 'lucide-react';
-import { motion } from 'motion/react';
+import React, { useState, useEffect, useRef, Fragment } from 'react';
+import { Activity, ShieldAlert, TrendingUp, ChevronRight, Clock, Plus, Edit2, Trash2, X, Check, LogOut, AlertTriangle, CalendarMinus, CalendarPlus, Newspaper } from 'lucide-react';
+import { motion, LayoutGroup } from 'motion/react';
 import { supabase } from './supabase';
 
 type TensionLevel = '极高' | '高' | '中等' | '较低';
+
+/** 每条危机单独保存；random 表示打开详情时抽签。 */
+type NewsOutletSetting = 'random' | 'nyt' | 'cnn' | 'wapo' | 'reuters';
+type NewsOutletResolved = 'nyt' | 'cnn' | 'wapo' | 'reuters';
+
+const NEWS_OUTLET_POOL: NewsOutletResolved[] = ['nyt', 'cnn', 'wapo', 'reuters'];
+
+const parseNewsOutletSetting = (raw: unknown): NewsOutletSetting => {
+  const v = typeof raw === 'string' ? raw : '';
+  if (v === 'random' || v === 'nyt' || v === 'cnn' || v === 'wapo' || v === 'reuters') {
+    return v;
+  }
+  return 'random';
+};
+
+const resolveNewsOutletSetting = (setting: NewsOutletSetting): NewsOutletResolved => {
+  if (setting === 'random') {
+    return NEWS_OUTLET_POOL[Math.floor(Math.random() * NEWS_OUTLET_POOL.length)]!;
+  }
+  return setting;
+};
+
+const DISPLAY_OUTLET_FORM_OPTIONS: { value: NewsOutletSetting; label: string }[] = [
+  { value: 'random', label: '随机（打开时再抽一种）' },
+  { value: 'nyt', label: '纽约时报风 · Newsreader 米色' },
+  { value: 'cnn', label: 'CNN 风 · Barlow 红黑' },
+  { value: 'wapo', label: '华盛顿邮报风 · Baskerville 蓝' },
+  { value: 'reuters', label: '路透社风 · 灰底 Plex Mono' }
+];
 
 interface CrisisBase {
   id: string;
@@ -12,6 +41,8 @@ interface CrisisBase {
   details: string;
   tension: TensionLevel;
   trend: 'up' | 'down' | 'stable';
+  /** 详情弹窗美术风格，按卡片存储 */
+  display_outlet: NewsOutletSetting;
   created_at?: string;
   updated_at?: string;
 }
@@ -23,8 +54,13 @@ interface Crisis extends CrisisBase {
 interface NationalCrisis extends CrisisBase {
 }
 
+const outletForCrisis = (crisis: CrisisBase): NewsOutletResolved =>
+  resolveNewsOutletSetting(crisis.display_outlet ?? 'random');
+
 interface CrisisDetailModalData extends CrisisBase {
   scopeLabel: string;
+  detailSource: 'national' | 'state';
+  displayOutlet: NewsOutletResolved;
 }
 
 interface StateData {
@@ -32,12 +68,23 @@ interface StateData {
   stateName: string;
   stateEn: string;
   electoralVotes: number;
+  /** 由危机事件综合推导的档位（仅作参考，不参与百分数显示） */
   overallTension: TensionLevel;
+  /** 与 states.tension_percent 一致，完全由管理员手动设定 */
   tensionPercent: number;
   crises: Crisis[];
 }
 
 const getTodayIsoDate = () => new Date().toISOString().slice(0, 10);
+
+const addDaysIso = (isoDate: string, deltaDays: number) => {
+  const d = new Date(`${isoDate}T12:00:00`);
+  if (Number.isNaN(d.getTime())) {
+    return getTodayIsoDate();
+  }
+  d.setDate(d.getDate() + deltaDays);
+  return d.toISOString().slice(0, 10);
+};
 
 const formatDateParts = (isoDate: string) => {
   const [year = '----', month = '--', day = '--'] = isoDate.split('-');
@@ -56,17 +103,11 @@ const formatHeaderDate = (isoDate: string) => {
 
 const clampPercent = (value: number) => Math.max(0, Math.min(100, Math.round(value)));
 
-const defaultPercentByLevel = (level: TensionLevel) => {
-  switch (level) {
-    case '极高':
-      return 90;
-    case '高':
-      return 72;
-    case '中等':
-      return 50;
-    default:
-      return 30;
+const sortStatesByTension = (a: StateData, b: StateData) => {
+  if (b.tensionPercent !== a.tensionPercent) {
+    return b.tensionPercent - a.tensionPercent;
   }
+  return b.electoralVotes - a.electoralVotes;
 };
 
 const toEpoch = (value?: string) => {
@@ -78,6 +119,7 @@ const toEpoch = (value?: string) => {
 const LOCAL_ACCOUNTS: Array<{ id: string; username: string; password: string; role: 'admin' | 'viewer' }> = [
   { id: 'u1', username: 'SAMUN ELECTION', password: 'ACMUNC2026', role: 'admin' },
   { id: 'u2', username: 'SAMUN', password: 'ELECTION2020', role: 'viewer' },
+  { id: 'u12', username: 'SAMUN', password: '2020ELECTION', role: 'admin' },
   { id: 'u3', username: 'Georgia', password: 'ELECTION2020', role: 'viewer' },
   { id: 'u4', username: 'Pennsylvania', password: 'ELECTION2020', role: 'viewer' },
   { id: 'u5', username: 'Michigan', password: 'ELECTION2020', role: 'viewer' },
@@ -97,6 +139,306 @@ const getTensionColor = (level: TensionLevel) => {
     default: return 'text-gray-400 bg-gray-400/10 border-gray-400/30';
   }
 };
+
+const trendMeta = (trend: CrisisBase['trend']) => {
+  switch (trend) {
+    case 'up':
+      return {
+        label: '上升',
+        hint: '紧张加剧',
+        pill: 'border-[#A34A51]/45 bg-[#A34A51]/12 text-[#F4D0D4]',
+        iconClass: 'text-[#A34A51]'
+      };
+    case 'down':
+      return {
+        label: '下降',
+        hint: '紧张趋缓',
+        pill: 'border-emerald-400/40 bg-emerald-500/10 text-emerald-100',
+        iconClass: 'text-emerald-400'
+      };
+    default:
+      return {
+        label: '平稳',
+        hint: '维持现状',
+        pill: 'border-white/22 bg-white/[0.06] text-gray-200',
+        iconClass: 'text-gray-400'
+      };
+  }
+};
+
+const tensionLabelEn = (level: TensionLevel) => {
+  switch (level) {
+    case '极高':
+      return 'Critical';
+    case '高':
+      return 'High';
+    case '中等':
+      return 'Moderate';
+    default:
+      return 'Low';
+  }
+};
+
+const trendLabelEn = (trend: CrisisBase['trend']) => {
+  switch (trend) {
+    case 'up':
+      return 'Escalating';
+    case 'down':
+      return 'Cooling';
+    default:
+      return 'Steady';
+  }
+};
+
+/** 各「报纸风」示意文案与主题；非官方稿件。 */
+const OUTLET_COPY: Record<
+  NewsOutletResolved,
+  {
+    styleLine: string;
+    natKicker: string;
+    natDeck: string;
+    stateDeck: string;
+    /** 州级详情：可选「小字报眉」，与 stateHeaderTitle 同时设则形成大小字层次 */
+    stateHeaderKicker?: string;
+    stateHeaderTitle?: string;
+  }
+> = {
+  nyt: {
+    styleLine: 'editorial spread',
+    natKicker: 'From the National desk · final edition',
+    natDeck: 'Cover Story — National',
+    stateDeck: 'Statehouse correspondence'
+  },
+  cnn: {
+    styleLine: 'Cable news — breaking wall',
+    natKicker: 'This is a developing situation',
+    natDeck: 'Breaking · National',
+    stateDeck: 'State coverage · now'
+  },
+  wapo: {
+    styleLine: 'Metro broadsheet — capital edition',
+    natKicker: 'Sunday filing / A-section lead',
+    natDeck: 'Above the fold — National',
+    stateDeck: 'Metro & states — extra',
+    stateHeaderKicker: 'SAMUN — Metro broadsheet',
+    stateHeaderTitle: 'capital & states — extra'
+  },
+  reuters: {
+    styleLine: 'Wire service — plain text',
+    natKicker: 'REFILE · verified lines only',
+    natDeck: 'WM / National bulletin',
+    stateDeck: 'State line / wire'
+  }
+};
+
+const OUTLET_THEME: Record<
+  NewsOutletResolved,
+  {
+    rootFont: string;
+    shell: string;
+    paper: string;
+    paperNoise: string;
+    border: string;
+    shadow: string;
+    closeBtn: string;
+    backdrop: string;
+    nationalBanner: string;
+    nationalBannerInnerRule: string;
+    nationalKicker: string;
+    nationalHeadline: string;
+    nationalMastMuted: string;
+    borderLeftLead: string;
+    bodyLeadWrap: string;
+    stateHeader: string;
+    stateMastheadMuted: string;
+    stateTitle: string;
+    dateline: string;
+    bodyNational: string;
+    bodyState: string;
+    bodyStateCols: string;
+    stateMastRow: string;
+    tagPrimary: string;
+    tagSecondary: string;
+    footer: string;
+    headlineNat: string;
+    headlineState: string;
+  }
+> = {
+  nyt: {
+    rootFont: "font-['Newsreader',Georgia,'Times New Roman',serif]",
+    shell: 'w-full max-w-[44rem]',
+    paper: 'bg-[#ebe4cf]',
+    paperNoise: 'opacity-[0.14]',
+    border: 'border-2 border-[#3d2914]/35',
+    shadow: 'shadow-[0_22px_55px_rgba(45,30,18,0.4)]',
+    closeBtn: 'border-[#5c4030]/40 bg-[#ebe4cf]/95 text-[#2a1810] hover:border-[#3d2914]',
+    backdrop: 'bg-[#3d2b1f]/90',
+    nationalBanner: 'bg-[#ebe4cf] text-[#2a1810] border-b-[4px] border-[#5c2d2d]',
+    nationalBannerInnerRule: 'border-[#8b6914]/35',
+    nationalKicker:
+      "italic text-[#5c4030] text-sm sm:text-base tracking-[0.03em] normal-case font-['Newsreader',serif]",
+    nationalHeadline:
+      "font-semibold text-2xl sm:text-[2.15rem] leading-[1.1] text-[#3d2914] font-['Newsreader',serif]",
+    nationalMastMuted: 'text-[#6b5344]',
+    borderLeftLead: 'border-l-0 pl-0',
+    bodyLeadWrap: 'max-w-[26rem] mx-auto',
+    stateHeader: 'border-b-[4px] border-[#5c2d2d] pb-6 text-center bg-[#e8e0cb]/60',
+    stateMastRow: 'justify-center',
+    stateMastheadMuted: 'text-[#6b5344]',
+    stateTitle: 'text-[#2a1810] font-semibold',
+    dateline: 'text-[#5c4030] border-b border-[#8b6914]/40',
+    bodyNational:
+      "text-[1.07rem] sm:text-[1.14rem] leading-[1.97] text-[#241811] text-justify font-['Newsreader',serif]",
+    bodyState:
+      "text-[0.98rem] sm:text-[1.05rem] leading-[1.93] text-[#342418] text-left font-['Newsreader',serif]",
+    bodyStateCols: 'columns-1 w-full',
+    tagPrimary: 'border border-[#5c2d2d] bg-[#ddd2bc] text-[#2a1810] rounded-sm',
+    tagSecondary: 'border border-[#8b6914]/45 bg-[#f7f2e4] text-[#342418] rounded-sm',
+    footer: 'border-[#8b6914]/30 text-[#6b5344]',
+    headlineNat:
+      "font-semibold text-[1.8rem] sm:text-[2.5rem] text-[#1f140c] leading-[1.08] font-['Newsreader',serif]",
+    headlineState:
+      "font-semibold text-[1.6rem] sm:text-[2.05rem] text-[#1f140c] leading-[1.12] font-['Newsreader',serif]"
+  },
+  cnn: {
+    rootFont: "font-['Barlow Condensed','Arial Narrow',Arial,sans-serif]",
+    shell: 'w-full max-w-[56rem]',
+    paper: 'bg-[#f8f8f8]',
+    paperNoise: 'opacity-[0.03]',
+    border: 'border-0 ring-[3px] ring-[#0057B8] ring-offset-2 ring-offset-black/5',
+    shadow: 'shadow-[12px_16px_0_0_#000,0_20px_50px_rgba(225,6,0,0.2)]',
+    closeBtn: 'border-[#0057B8]/30 bg-[#f8f8f8]/95 text-[#111] hover:border-[#E10600]',
+    backdrop: 'bg-[#001a33]/88',
+    nationalBanner:
+      'bg-gradient-to-r from-[#0a0a0a] via-[#1a1a1a] to-[#0a0a0a] text-white border-t-[18px] border-[#E10600] pt-6 pb-8',
+    nationalBannerInnerRule: 'border-[#0057B8]/40',
+    nationalKicker:
+      'inline-flex items-center gap-2 font-black text-[10px] sm:text-[11px] tracking-[0.32em] uppercase text-black bg-[#FFD000] px-3 py-1.5 border-2 border-black',
+    nationalHeadline:
+      'font-black uppercase text-xl sm:text-2xl text-white tracking-[0.04em] mt-4 drop-shadow-md',
+    nationalMastMuted: 'text-neutral-400',
+    borderLeftLead: 'border-l-[10px] border-[#0057B8] pl-5 sm:pl-6 bg-[#eef4ff] py-5',
+    bodyLeadWrap: 'max-w-none',
+    stateHeader:
+      'border-b-[10px] border-[#E10600] pb-5 text-center bg-gradient-to-b from-[#f0f0f0] to-white -mx-6 sm:-mx-10 px-6 sm:px-10 pt-8',
+    stateMastRow: 'justify-center',
+    stateMastheadMuted: 'text-[#0057B8]',
+    stateTitle: 'text-[#111] font-black uppercase tracking-wide',
+    dateline: 'text-[#111] border-b-4 border-[#0057B8] font-black tracking-wide',
+    bodyNational:
+      'text-[1.06rem] sm:text-[1.14rem] leading-[1.65] text-neutral-900 text-left font-semibold antialiased',
+    bodyState:
+      'text-[0.98rem] sm:text-[1.05rem] leading-[1.72] text-neutral-800 text-left font-medium',
+    bodyStateCols: 'columns-1 w-full',
+    tagPrimary: 'rounded-none border-2 border-black bg-[#E10600] text-white font-black text-[11px]',
+    tagSecondary: 'rounded-none border-2 border-[#0057B8] bg-[#0057B8] text-white font-black text-[11px]',
+    footer: 'border-[#0057B8]/30 text-neutral-600 font-black uppercase text-[9px] tracking-widest',
+    headlineNat: 'font-black text-[2.2rem] sm:text-[3.15rem] text-[#111] uppercase leading-[0.96]',
+    headlineState: 'font-black text-[1.85rem] sm:text-[2.35rem] text-[#111] uppercase leading-[1]'
+  },
+  wapo: {
+    rootFont: "font-['Libre Baskerville',Georgia,'Times New Roman',serif]",
+    shell: 'w-full max-w-3xl',
+    paper: 'bg-gradient-to-br from-[#dfeaf4] via-[#eef6ff] to-[#cfddee]',
+    paperNoise: 'opacity-[0.05]',
+    border: 'border-[4px] border-[#0f3d6b]',
+    shadow: 'shadow-[0_22px_60px_rgba(15,61,107,0.35)]',
+    closeBtn: 'border-[#0f3d6b]/45 bg-[#eef6ff]/95 text-[#0b2d4d] hover:border-[#0f3d6b]',
+    backdrop: 'bg-[#06182d]/90',
+    nationalBanner:
+      'bg-[#0f3d6b] text-[#e8f4ff] border-b-[12px] border-[#ffb81c] pt-8 pb-8 shadow-[inset_0_-20px_40px_rgba(0,0,0,0.12)]',
+    nationalBannerInnerRule: 'border-[#7eb8e8]/35',
+    nationalKicker:
+      'font-sans font-bold text-[11px] sm:text-xs tracking-[0.26em] uppercase text-[#ffb81c]',
+    nationalHeadline: 'font-bold text-2xl sm:text-[2.55rem] leading-[1.06] text-white',
+    nationalMastMuted: 'text-[#b8d9f5]',
+    borderLeftLead: 'border-l-[8px] border-[#ffb81c] bg-white/90 pl-6 py-4 shadow-sm',
+    bodyLeadWrap: '',
+    stateHeader:
+      'border-b-[12px] border-[#0f3d6b] pb-6 text-center bg-white/90 border-t-4 border-[#ffb81c]',
+    stateMastRow: 'justify-center',
+    stateMastheadMuted: 'text-[#0f3d6b]',
+    stateTitle: 'text-[#082642] font-bold',
+    dateline: 'text-[#14436f] border-y-2 border-[#0f3d6b]/25 bg-[#ddebf7]/80',
+    bodyNational:
+      'text-[1.05rem] sm:text-[1.15rem] leading-[1.92] text-[#0d1f2d] text-justify font-normal',
+    bodyState: 'text-[0.98rem] sm:text-[1.06rem] leading-[1.9] text-[#0d1f2d] text-left',
+    bodyStateCols: 'columns-1 w-full',
+    tagPrimary: 'rounded-sm border-2 border-[#0f3d6b] bg-[#cfe2f7] text-[#082642] font-bold',
+    tagSecondary: 'rounded-sm border border-[#ffb81c] bg-white text-[#0d1f2d]',
+    footer: 'border-[#0f3d6b]/30 text-[#14436f]',
+    headlineNat: 'font-bold text-[1.9rem] sm:text-[2.85rem] text-[#071a2e] leading-[1.06]',
+    headlineState: 'font-bold text-[1.5rem] sm:text-[2.15rem] text-[#071a2e] leading-[1.1]'
+  },
+  reuters: {
+    rootFont: "font-['IBM Plex Mono','Menlo',monospace]",
+    shell: 'w-full max-w-[32rem]',
+    paper: 'bg-[#c9cfc4]',
+    paperNoise: 'opacity-0',
+    border: 'border-2 border-[#1c2e1f] rounded-none',
+    shadow: 'shadow-[6px_6px_0_0_#1c2e1f]',
+    closeBtn: 'rounded-none border-[#1c2e1f] bg-[#c9cfc4]/95 text-[#0f1a12] hover:border-[#00a651]',
+    backdrop: 'bg-[#0d120e]/92',
+    nationalBanner:
+      'bg-[#1a241c] text-[#e8ede5] border-t-[8px] border-[#00a651] px-5 sm:px-8 pt-5 pb-6',
+    nationalBannerInnerRule: 'border-[#4a5d4a]/55',
+    nationalKicker:
+      'text-[#7fd4a4] text-[10px] sm:text-[11px] uppercase tracking-[0.2em] font-semibold',
+    nationalHeadline: 'font-bold text-xs sm:text-sm leading-relaxed text-[#f0f4ec] uppercase',
+    nationalMastMuted: 'text-[#9aaa9a]',
+    borderLeftLead: 'border-l-2 border-dotted border-[#1c2e1f] pl-4 bg-[#dde3d8] py-3',
+    bodyLeadWrap: '',
+    bodyNational: 'text-[0.88rem] sm:text-[0.92rem] leading-[1.68] text-[#0f1a12] text-left font-normal',
+    stateHeader:
+      'border-t-2 border-[#00a651] border-b-2 border-dashed border-[#1c2e1f] pb-5 pt-5 text-left bg-[#dde3d8]/50',
+    stateMastRow: 'justify-start',
+    stateMastheadMuted: 'text-[#3d5c3d]',
+    stateTitle: 'text-[#0f1a12] font-bold uppercase text-base sm:text-lg',
+    dateline: 'text-[#2a3d2a] border-b border-dotted border-[#1c2e1f] text-[11px]',
+    bodyState: 'text-[0.84rem] sm:text-[0.9rem] leading-[1.72] text-[#1a261a] text-left',
+    bodyStateCols: 'columns-1 w-full',
+    tagPrimary:
+      'rounded-none border border-[#1c2e1f] bg-[#aab6aa] text-[#0f1a12] text-[9px] uppercase px-2 py-1 font-semibold',
+    tagSecondary:
+      'rounded-none border border-dashed border-[#00a651] bg-transparent text-[#0f1a12] text-[9px] uppercase px-2 py-1',
+    footer: 'border-[#1c2e1f]/40 text-[#3d5c3d] text-[9px]',
+    headlineNat: 'font-bold text-lg sm:text-[1.35rem] text-[#0a120c] leading-snug normal-case',
+    headlineState: 'font-bold text-base sm:text-lg text-[#0a120c] leading-snug normal-case'
+  }
+};
+
+function TrendBadge({
+  trend,
+  size = 'md'
+}: {
+  trend: CrisisBase['trend'];
+  size?: 'sm' | 'md' | 'lg';
+}) {
+  const m = trendMeta(trend);
+  const iconSz = size === 'lg' ? 18 : size === 'md' ? 16 : 13;
+  const pad = size === 'lg' ? 'px-3 py-2' : size === 'md' ? 'px-2.5 py-1.5' : 'px-2 py-1';
+  const titleCls = size === 'lg' ? 'text-sm' : size === 'md' ? 'text-xs' : 'text-[11px]';
+  const tagCls = size === 'sm' ? 'text-[8px]' : 'text-[9px]';
+  const hintCls = size === 'sm' ? 'text-[10px]' : 'text-[11px]';
+
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 sm:gap-2 rounded-lg border ${m.pill} ${pad} shadow-sm max-w-full`}
+      title={`趋势：${m.label}（${m.hint}）`}
+    >
+      <span className={`shrink-0 ${m.iconClass}`}>
+        {trend === 'up' && <TrendingUp size={iconSz} strokeWidth={2.25} />}
+        {trend === 'down' && <TrendingUp size={iconSz} className="rotate-180" strokeWidth={2.25} />}
+        {trend === 'stable' && <Activity size={iconSz} strokeWidth={2.25} />}
+      </span>
+      <span className="min-w-0 flex items-center gap-1.5 sm:gap-2 whitespace-nowrap">
+        <span className={`font-mono uppercase tracking-widest text-white/45 shrink-0 ${tagCls}`}>趋势</span>
+        <span className={`font-bold shrink-0 ${titleCls}`}>{m.label}</span>
+        <span className={`font-normal text-white/55 shrink-0 ${hintCls}`}>· {m.hint}</span>
+      </span>
+    </span>
+  );
+}
 
 const calculateStateOverallTension = (crises: Crisis[]): TensionLevel => {
   if (crises.length === 0) {
@@ -230,10 +572,7 @@ const CrisisCard = ({
             }`}
           >
             {isRecentlyCreated ? (
-              <span className="inline-flex items-center gap-1 tracking-wide">
-                <Sparkles size={11} />
-                NEW 新增危机
-              </span>
+              <span className="tracking-wide">NEW 新增危机</span>
             ) : (
               '更新危机'
             )}
@@ -268,17 +607,140 @@ const CrisisCard = ({
         {crisis.details}
       </p>
       
-      <div className="mt-auto pt-4 border-t border-white/5 flex items-center">
-        <div className="flex items-center gap-1.5 text-xs text-gray-500 font-mono">
-          <span>TREND</span>
-          {crisis.trend === 'up' && <TrendingUp size={14} className="text-[#A34A51]" />}
-          {crisis.trend === 'down' && <TrendingUp size={14} className="text-green-500 transform rotate-180" />}
-          {crisis.trend === 'stable' && <Activity size={14} className="text-gray-400" />}
-        </div>
+      <div className="mt-auto pt-4 border-t border-white/5">
+        <TrendBadge trend={crisis.trend} size="md" />
       </div>
     </div>
   );
 };
+
+/** 头版新闻：报纸式列表，与下方摇摆州网格卡片区分 */
+interface FrontPageNewsRowProps {
+  crisis: NationalCrisis;
+  isAdmin: boolean;
+  onUpdateTension: (id: string, tension: TensionLevel) => void | Promise<void>;
+  onDelete: (id: string) => void;
+  onEdit: (crisis: NationalCrisis) => void;
+  onOpenDetail: (crisis: CrisisBase) => void;
+}
+
+function FrontPageNewsRow({
+  crisis,
+  isAdmin,
+  onUpdateTension,
+  onDelete,
+  onEdit,
+  onOpenDetail
+}: FrontPageNewsRowProps) {
+  const isCritical = crisis.tension === '极高';
+  const createdAt = toEpoch(crisis.created_at);
+  const updatedAt = toEpoch(crisis.updated_at);
+  const now = Date.now();
+  const isRecentlyCreated = createdAt > 0 && now - createdAt <= 10 * 60 * 1000;
+  const isRecentlyUpdated = updatedAt > 0 && updatedAt > createdAt && now - updatedAt <= 10 * 60 * 1000;
+
+  return (
+    <div
+      className={`group relative flex flex-col lg:flex-row gap-4 lg:gap-8 pl-4 lg:pl-5 border-l-2 cursor-pointer rounded-r-lg transition-colors
+        ${isCritical ? 'border-l-[#A34A51] bg-[#A34A51]/[0.06]' : 'border-l-[#D4AF37]/45 bg-black/15'}
+        hover:bg-white/[0.04] py-5 px-3 sm:pr-4`}
+      onClick={() => onOpenDetail(crisis)}
+    >
+      {isAdmin && (
+        <div className="absolute top-3 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-20">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onEdit(crisis);
+            }}
+            className="p-1.5 rounded-md bg-[#0B0F19]/90 border border-white/10 hover:border-white/25 text-gray-300 hover:text-white transition-colors"
+            title="编辑"
+          >
+            <Edit2 size={12} />
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(crisis.id);
+            }}
+            className="p-1.5 rounded-md bg-[#0B0F19]/90 border border-red-500/25 hover:border-red-400/50 text-red-400 hover:text-red-300 transition-colors"
+            title="删除"
+          >
+            <Trash2 size={12} />
+          </button>
+        </div>
+      )}
+
+      <div className="shrink-0 lg:w-28 flex flex-row lg:flex-col gap-3 lg:gap-2 items-start">
+        <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-[#D4AF37]/80">
+          <Newspaper size={13} className="shrink-0 opacity-90" />
+          <span>Headline</span>
+        </div>
+        <div className="flex items-center gap-1.5 text-xs text-gray-400 font-mono bg-black/25 px-2 py-1 rounded-md">
+          <Clock size={12} className="shrink-0" />
+          {crisis.time}
+        </div>
+        {(isRecentlyCreated || isRecentlyUpdated) && (
+          <div
+            className={`text-[9px] font-bold px-2 py-0.5 rounded border w-fit ${
+              isRecentlyCreated
+                ? 'text-[#F1C9CF] border-[#A34A51]/55 bg-[#2A1A23]'
+                : 'text-[#D97757] border-[#D97757]/45 bg-[#D97757]/10'
+            }`}
+          >
+            {isRecentlyCreated ? (
+              <span className="tracking-wide">NEW</span>
+            ) : (
+              'UPDATED'
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="flex-1 min-w-0 pr-10 lg:pr-12">
+        <h4
+          className={`font-serif font-bold text-xl sm:text-2xl lg:text-[1.65rem] leading-snug tracking-tight ${isCritical ? 'text-[#E8A8AD]' : 'text-[#F5F2EC]'}`}
+        >
+          {crisis.title}
+        </h4>
+        <p className="mt-2.5 text-sm sm:text-base text-gray-400 leading-relaxed line-clamp-2 lg:line-clamp-3 font-serif">
+          {crisis.details}
+        </p>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          {isAdmin ? (
+            <select
+              value={crisis.tension}
+              onChange={(e) => onUpdateTension(crisis.id, e.target.value as TensionLevel)}
+              onClick={(e) => e.stopPropagation()}
+              className={`px-2.5 py-1 rounded-md border text-[11px] font-bold outline-none cursor-pointer ${getTensionColor(crisis.tension)}`}
+            >
+              <option value="极高" className="bg-[#0B0F19] text-[#A34A51]">
+                极高
+              </option>
+              <option value="高" className="bg-[#0B0F19] text-[#D97757]">
+                高
+              </option>
+              <option value="中等" className="bg-[#0B0F19] text-[#D4AF37]">
+                中等
+              </option>
+              <option value="较低" className="bg-[#0B0F19] text-gray-400">
+                较低
+              </option>
+            </select>
+          ) : (
+            <div className={`px-2.5 py-1 rounded-md border text-[11px] font-bold inline-flex items-center gap-1 ${getTensionColor(crisis.tension)}`}>
+              {crisis.tension === '极高' ? <ShieldAlert size={12} /> : <Activity size={12} />}
+              {crisis.tension}
+            </div>
+          )}
+          <TrendBadge trend={crisis.trend} size="sm" />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -298,13 +760,17 @@ export default function App() {
     title: '',
     details: '',
     tension: '中等' as TensionLevel,
-    trend: 'up' as 'up' | 'down' | 'stable'
+    trend: 'up' as 'up' | 'down' | 'stable',
+    display_outlet: 'random' as NewsOutletSetting
   });
   const [displayDate, setDisplayDate] = useState<string>(getTodayIsoDate());
   const [nationalTensionPercent, setNationalTensionPercent] = useState<number>(85);
   const [nationalTensionInput, setNationalTensionInput] = useState<string>('85');
-  const [isEditingDisplayDate, setIsEditingDisplayDate] = useState(false);
   const [dateInput, setDateInput] = useState<string>(getTodayIsoDate());
+  const [timelinePulse, setTimelinePulse] = useState(false);
+  const timelinePulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timelineDataHydratedRef = useRef(false);
+  const prevDisplayDateForFxRef = useRef(displayDate);
   const [isAddingNationalCrisis, setIsAddingNationalCrisis] = useState(false);
   const [editingNationalCrisisId, setEditingNationalCrisisId] = useState<string | null>(null);
   const [isFrontPageCollapsed, setIsFrontPageCollapsed] = useState(false);
@@ -315,12 +781,21 @@ export default function App() {
     title: '',
     details: '',
     tension: '中等' as TensionLevel,
-    trend: 'up' as 'up' | 'down' | 'stable'
+    trend: 'up' as 'up' | 'down' | 'stable',
+    display_outlet: 'random' as NewsOutletSetting
   });
   const [stateTensionInput, setStateTensionInput] = useState<string>('0');
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isFetchingRef = useRef(false);
   const queuedFetchRef = useRef(false);
+  const activeStateIdRef = useRef<string>('');
+  const stateListLayoutTransition = {
+    layout: {
+      type: 'tween' as const,
+      duration: 2.3,
+      ease: [0.16, 1, 0.3, 1] as const
+    }
+  };
 
   const formatCrisisTime = () => {
     const now = new Date();
@@ -332,6 +807,10 @@ export default function App() {
       fetchData();
     }
   }, [isAuthenticated]);
+
+  useEffect(() => {
+    activeStateIdRef.current = activeStateId;
+  }, [activeStateId]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -388,7 +867,12 @@ export default function App() {
       }
 
       const grouped = (states || []).map((state: any) => {
-        const stateCrises = ((crises || []).filter((c: any) => c.state_id === state.id) as Crisis[])
+        const stateCrises = (
+          (crises || []).filter((c: any) => c.state_id === state.id).map((c: any) => ({
+            ...c,
+            display_outlet: parseNewsOutletSetting(c.display_outlet)
+          })) as Crisis[]
+        )
           .sort((a, b) => {
             const aSort = Math.max(toEpoch(a.updated_at), toEpoch(a.created_at));
             const bSort = Math.max(toEpoch(b.updated_at), toEpoch(b.created_at));
@@ -398,45 +882,55 @@ export default function App() {
             return b.id.localeCompare(a.id);
           });
         const derivedOverall = calculateStateOverallTension(stateCrises);
+        const tensionPercent = clampPercent(
+          typeof state.tension_percent === 'number' ? state.tension_percent : 60
+        );
         return {
           ...state,
           overallTension: derivedOverall,
-          tensionPercent: clampPercent(
-            typeof state.tension_percent === 'number' ? state.tension_percent : defaultPercentByLevel(derivedOverall)
-          ),
+          tensionPercent,
           crises: stateCrises
         };
       })
-        .sort((a: any, b: any) => {
-          if (b.tensionPercent !== a.tensionPercent) {
-            return b.tensionPercent - a.tensionPercent;
-          }
-          return b.electoralVotes - a.electoralVotes;
-        }) as StateData[];
+        .sort((a: any, b: any) => sortStatesByTension(a, b)) as StateData[];
 
       setStatesData(grouped);
       setNationalCrises(
-        ((national || []) as NationalCrisis[]).sort((a, b) => {
-          const aSort = Math.max(toEpoch(a.updated_at), toEpoch(a.created_at));
-          const bSort = Math.max(toEpoch(b.updated_at), toEpoch(b.created_at));
-          if (bSort !== aSort) {
-            return bSort - aSort;
-          }
-          return b.id.localeCompare(a.id);
-        })
+        ((national || []) as any[])
+          .map((c) => ({
+            ...c,
+            display_outlet: parseNewsOutletSetting(c.display_outlet)
+          }))
+          .sort((a, b) => {
+            const aSort = Math.max(toEpoch(a.updated_at), toEpoch(a.created_at));
+            const bSort = Math.max(toEpoch(b.updated_at), toEpoch(b.created_at));
+            if (bSort !== aSort) {
+              return bSort - aSort;
+            }
+            return b.id.localeCompare(a.id);
+          }) as NationalCrisis[]
       );
       const currentDate = settings?.display_date || getTodayIsoDate();
+      if (!timelineDataHydratedRef.current) {
+        timelineDataHydratedRef.current = true;
+        prevDisplayDateForFxRef.current = currentDate;
+      }
       setDisplayDate(currentDate);
       setNationalTensionPercent(
         clampPercent(
           typeof settings?.national_tension_percent === 'number' ? settings.national_tension_percent : 85
         )
       );
-      if (!isEditingDisplayDate) {
-        setDateInput(currentDate);
-      }
-      if (grouped.length > 0 && !activeStateId) {
-        setActiveStateId(grouped[0].id);
+      setDateInput(currentDate);
+      if (grouped.length > 0) {
+        const currentActiveId = activeStateIdRef.current;
+        const hasCurrentActive = currentActiveId
+          ? grouped.some((state) => state.id === currentActiveId)
+          : false;
+
+        if (!hasCurrentActive) {
+          setActiveStateId(grouped[0].id);
+        }
       }
     } catch (err) {
       console.error('Failed to fetch data', err);
@@ -492,23 +986,61 @@ export default function App() {
     };
   }, [isAuthenticated]);
 
-  const handleUpdateDisplayDate = async () => {
-    const nextDate = dateInput || getTodayIsoDate();
+  const handleUpdateDisplayDate = async (nextDateOverride?: string) => {
+    const nextDate = nextDateOverride ?? dateInput ?? getTodayIsoDate();
     try {
       const { error } = await supabase
         .from('app_settings')
-        .upsert({ id: 1, display_date: nextDate }, { onConflict: 'id' });
+        .upsert(
+          {
+            id: 1,
+            display_date: nextDate,
+            national_tension_percent: nationalTensionPercent
+          },
+          { onConflict: 'id' }
+        );
 
       if (error) {
         throw error;
       }
       setDisplayDate(nextDate);
-      setIsEditingDisplayDate(false);
+      setDateInput(nextDate);
     } catch (err) {
       console.error('Failed to update display date', err);
+      setDateInput(displayDate);
       alert('更新日期失败，请稍后重试。');
     }
   };
+
+  const bumpDisplayDate = (deltaDays: number) => {
+    const base = displayDate || dateInput || getTodayIsoDate();
+    const next = addDaysIso(base, deltaDays);
+    void handleUpdateDisplayDate(next);
+  };
+
+  useEffect(() => {
+    if (!timelineDataHydratedRef.current) {
+      return;
+    }
+    if (prevDisplayDateForFxRef.current === displayDate) {
+      return;
+    }
+    prevDisplayDateForFxRef.current = displayDate;
+    setTimelinePulse(true);
+    if (timelinePulseTimerRef.current) {
+      clearTimeout(timelinePulseTimerRef.current);
+    }
+    timelinePulseTimerRef.current = setTimeout(() => {
+      timelinePulseTimerRef.current = null;
+      setTimelinePulse(false);
+    }, 1100);
+    return () => {
+      if (timelinePulseTimerRef.current) {
+        clearTimeout(timelinePulseTimerRef.current);
+        timelinePulseTimerRef.current = null;
+      }
+    };
+  }, [displayDate]);
 
   const handleUpdateNationalTensionPercent = async (value: number) => {
     const nextValue = clampPercent(value);
@@ -628,9 +1160,13 @@ export default function App() {
       if (error) {
         throw error;
       }
-      setStatesData((prev) =>
-        prev.map((state) => (state.id === stateId ? { ...state, tensionPercent: nextValue } : state))
-      );
+      setStatesData((prev) => {
+        const next = prev.map((state) =>
+          state.id === stateId ? { ...state, tensionPercent: nextValue } : state
+        );
+        next.sort(sortStatesByTension);
+        return next;
+      });
     } catch (err) {
       console.error('Failed to update state tension percent', err);
       alert('更新州紧张度失败，请稍后重试。');
@@ -640,14 +1176,18 @@ export default function App() {
   const openStateCrisisDetail = (crisis: CrisisBase) => {
     setSelectedCrisisDetail({
       ...crisis,
-      scopeLabel: activeState?.stateName || '州级危机'
+      scopeLabel: activeState?.stateName || 'State desk',
+      detailSource: 'state',
+      displayOutlet: outletForCrisis(crisis)
     });
   };
 
   const openNationalCrisisDetail = (crisis: CrisisBase) => {
     setSelectedCrisisDetail({
       ...crisis,
-      scopeLabel: '头版新闻'
+      scopeLabel: 'National Desk — Front Page',
+      detailSource: 'national',
+      displayOutlet: outletForCrisis(crisis)
     });
   };
 
@@ -668,14 +1208,22 @@ export default function App() {
       title: crisis.title,
       details: crisis.details,
       tension: crisis.tension,
-      trend: crisis.trend
+      trend: crisis.trend,
+      display_outlet: crisis.display_outlet ?? 'random'
     });
     setIsAddingCrisis(true);
   };
 
   const openAddForm = () => {
     setEditingCrisisId(null);
-    setFormData({ time: formatCrisisTime(), title: '', details: '', tension: '中等', trend: 'up' });
+    setFormData({
+      time: formatCrisisTime(),
+      title: '',
+      details: '',
+      tension: '中等',
+      trend: 'up',
+      display_outlet: 'random'
+    });
     setIsAddingCrisis(true);
   };
 
@@ -691,14 +1239,22 @@ export default function App() {
       title: crisis.title,
       details: crisis.details,
       tension: crisis.tension,
-      trend: crisis.trend
+      trend: crisis.trend,
+      display_outlet: crisis.display_outlet ?? 'random'
     });
     setIsAddingNationalCrisis(true);
   };
 
   const openAddNationalForm = () => {
     setEditingNationalCrisisId(null);
-    setNationalFormData({ time: formatCrisisTime(), title: '', details: '', tension: '中等', trend: 'up' });
+    setNationalFormData({
+      time: formatCrisisTime(),
+      title: '',
+      details: '',
+      tension: '中等',
+      trend: 'up',
+      display_outlet: 'random'
+    });
     setIsAddingNationalCrisis(true);
   };
 
@@ -938,12 +1494,32 @@ export default function App() {
             >
               <LogOut size={16} />
             </button>
-            <div className="text-right hidden md:block border-l border-white/10 pl-4">
-              <div className="text-[#A34A51] font-mono font-bold text-lg">{headerDateLabel}</div>
-              <div className="text-xs text-gray-400 uppercase tracking-wider flex items-center justify-end gap-2">
-                <span className="w-2 h-2 rounded-full bg-[#A34A51] animate-pulse"></span>
+            <div className="text-right hidden md:block border-l border-white/10 pl-4 min-w-[9rem]">
+              <motion.div
+                key={displayDate}
+                initial={{ opacity: 0.65, y: -5, filter: 'blur(4px)' }}
+                animate={{
+                  opacity: 1,
+                  y: 0,
+                  filter: 'blur(0px)'
+                }}
+                transition={{ type: 'spring', stiffness: 520, damping: 28 }}
+                className={`text-[#A34A51] font-mono font-bold text-lg ${timelinePulse ? 'drop-shadow-[0_0_12px_rgba(163,74,81,0.55)]' : ''}`}
+              >
+                {headerDateLabel}
+              </motion.div>
+              <motion.div
+                animate={timelinePulse ? { opacity: [0.6, 1, 0.85] } : { opacity: 1 }}
+                transition={{ duration: 0.6, repeat: timelinePulse ? 2 : 0 }}
+                className="text-xs text-gray-400 uppercase tracking-wider flex items-center justify-end gap-2 mt-0.5"
+              >
+                <motion.span
+                  className="w-2 h-2 rounded-full bg-[#A34A51]"
+                  animate={timelinePulse ? { scale: [1, 1.45, 1], opacity: [1, 0.55, 1] } : { scale: 1, opacity: 1 }}
+                  transition={{ duration: 0.55, repeat: timelinePulse ? 2 : 0, ease: 'easeInOut' }}
+                />
                 Live Timeline
-              </div>
+              </motion.div>
             </div>
           </div>
         </div>
@@ -951,58 +1527,162 @@ export default function App() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-6 py-12 relative z-10">
-        {/* Title Section */}
-        <div className="mb-12 flex flex-col md:flex-row justify-between items-end gap-8">
-          <div className="max-w-2xl">
-            <h2 className="text-4xl md:text-5xl font-serif font-bold leading-tight">
+        {/* Title Section — 大屏顶对齐 CURRENT DATE 卡片 */}
+        <div className="mb-10 flex flex-col lg:flex-row lg:items-start justify-between gap-6 lg:gap-10">
+          <div className="min-w-0 flex-1 max-w-3xl">
+            <h2 className="text-5xl md:text-6xl lg:text-[3.35rem] xl:text-[3.65rem] font-serif font-bold leading-[1.06] tracking-tight">
               七大摇摆州<br/>
               <span className="text-[#A34A51]">选举周危机档案</span>
             </h2>
           </div>
           
           {/* Overall Threat Meter */}
-          <div className="bg-[#131B2F] border border-[#A34A51]/30 rounded-2xl p-6 flex items-center gap-6 min-w-[340px] shadow-[0_0_40px_rgba(163,74,81,0.15)] relative">
-            <div className="relative w-20 h-20 flex items-center justify-center">
-              <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
-                <circle cx="50" cy="50" r="45" fill="none" stroke="#1F2937" strokeWidth="8" />
-                <circle cx="50" cy="50" r="45" fill="none" stroke="#A34A51" strokeWidth="8" strokeDasharray="283" strokeDashoffset="42" className="transition-all duration-1000" />
-              </svg>
-              <div className="absolute inset-0 flex items-center justify-center flex-col">
-                <span className="text-2xl font-bold text-[#A34A51] font-mono">{dateParts.day}</span>
-                <span className="text-[10px] text-gray-400 font-mono">DAY</span>
-              </div>
-            </div>
-            <div>
-              <div className="text-sm text-gray-400 font-mono mb-1">CURRENT DATE</div>
-              <div className="text-2xl font-bold text-white tracking-widest">{dateParts.year}.{dateParts.month}</div>
-              <div className="text-xs text-[#A34A51] mt-1 flex items-center gap-1 font-mono">
-                <Clock size={12} /> {displayDate}
-              </div>
-              <div className="mt-3">
-                <div className="flex items-center justify-between text-[11px] font-mono text-gray-400 mb-1">
-                  <span>NATIONAL TENSION</span>
-                  <span className="text-[#A34A51] font-bold">{nationalTensionPercent}%</span>
+          <motion.div
+            className="bg-[#131B2F] border border-[#A34A51]/30 rounded-xl p-5 sm:p-6 w-full lg:w-auto lg:shrink-0 lg:min-w-[26rem] xl:min-w-[30rem] lg:max-w-2xl shadow-[0_0_32px_rgba(163,74,81,0.14)] relative overflow-hidden lg:self-start"
+            animate={
+              timelinePulse
+                ? {
+                    boxShadow: [
+                      '0 0 40px rgba(163,74,81,0.15)',
+                      '0 0 52px rgba(163,74,81,0.42)',
+                      '0 0 40px rgba(163,74,81,0.15)'
+                    ],
+                    borderColor: ['rgba(163,74,81,0.3)', 'rgba(163,74,81,0.65)', 'rgba(163,74,81,0.3)']
+                  }
+                : {
+                    boxShadow: '0 0 40px rgba(163,74,81,0.15)',
+                    borderColor: 'rgba(163,74,81,0.3)'
+                  }
+            }
+            transition={{ duration: 0.55, ease: 'easeInOut' }}
+          >
+            {timelinePulse && (
+              <motion.div
+                className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-[#A34A51]/12 to-transparent"
+                initial={{ x: '-100%' }}
+                animate={{ x: '100%' }}
+                transition={{ duration: 0.65, ease: 'easeOut' }}
+              />
+            )}
+            <div className="flex flex-col sm:flex-row sm:items-stretch gap-4 sm:gap-5">
+              <div className="flex gap-4 sm:gap-5 items-center min-w-0 flex-1">
+                <div className="relative w-[4.25rem] h-[4.25rem] sm:w-20 sm:h-20 shrink-0 flex items-center justify-center">
+                  <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
+                    <circle cx="50" cy="50" r="45" fill="none" stroke="#1F2937" strokeWidth="8" />
+                    <motion.circle
+                      cx="50"
+                      cy="50"
+                      r="45"
+                      fill="none"
+                      stroke="#A34A51"
+                      strokeWidth="8"
+                      strokeDasharray="283"
+                      strokeDashoffset="42"
+                      animate={
+                        timelinePulse
+                          ? { strokeWidth: [8, 10, 8], opacity: [1, 0.92, 1] }
+                          : { strokeWidth: 8, opacity: 1 }
+                      }
+                      transition={{ duration: 0.45, ease: 'easeInOut' }}
+                      className="transition-all duration-1000"
+                    />
+                  </svg>
+                  <div className="absolute inset-0 flex items-center justify-center flex-col leading-none">
+                    <motion.span
+                      key={displayDate + '-day'}
+                      initial={{ scale: 1.35, opacity: 0.3 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      transition={{ type: 'spring', stiffness: 400, damping: 22 }}
+                      className="text-xl sm:text-2xl font-bold text-[#A34A51] font-mono tabular-nums"
+                    >
+                      {dateParts.day}
+                    </motion.span>
+                    <span className="text-[9px] sm:text-[10px] text-gray-500 font-mono mt-0.5 uppercase tracking-wider">day</span>
+                  </div>
                 </div>
-                <div className="w-48 h-2 rounded-full bg-white/10 overflow-hidden">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[10px] sm:text-xs text-gray-500 font-mono uppercase tracking-widest mb-1">Current date</div>
+                  <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                    <motion.div
+                      key={displayDate + '-ym'}
+                      initial={{ opacity: 0.5, x: -4 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ type: 'spring', stiffness: 380, damping: 26 }}
+                      className="text-xl sm:text-2xl font-bold text-white tracking-widest font-mono"
+                    >
+                      {dateParts.year}.{dateParts.month}
+                    </motion.div>
+                    <span className="text-xs sm:text-sm text-[#A34A51]/90 flex items-center gap-1.5 font-mono">
+                      <Clock size={13} className="opacity-80 shrink-0" />
+                      {displayDate}
+                    </span>
+                  </div>
+
+                  {isAdmin && (
+                    <div className="mt-3 pt-3 border-t border-white/10">
+                      <div className="text-[10px] sm:text-[11px] text-gray-500 font-mono uppercase tracking-wider mb-2">时间线 · 即时同步</div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          title="向前一天"
+                          onClick={() => bumpDisplayDate(-1)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-white/12 bg-[#0B0F19] text-xs font-mono text-gray-200 hover:border-[#A34A51]/45 hover:text-[#F1C9CF] transition-colors"
+                        >
+                          <CalendarMinus size={15} className="text-[#A34A51]" />
+                          <span>−1</span>
+                        </button>
+                        <input
+                          type="date"
+                          value={dateInput}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            setDateInput(v);
+                            void handleUpdateDisplayDate(v);
+                          }}
+                          className="min-w-0 flex-1 basis-[9.5rem] max-w-[13rem] bg-[#0B0F19] border border-white/12 rounded-md px-2 py-1.5 text-xs sm:text-sm text-white outline-none focus:border-[#A34A51] font-mono [color-scheme:dark]"
+                        />
+                        <button
+                          type="button"
+                          title="向后一天"
+                          onClick={() => bumpDisplayDate(1)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-white/12 bg-[#0B0F19] text-xs font-mono text-gray-200 hover:border-[#A34A51]/45 hover:text-[#F1C9CF] transition-colors"
+                        >
+                          <span>+1</span>
+                          <CalendarPlus size={15} className="text-[#A34A51]" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="sm:w-px sm:min-h-[5.5rem] sm:self-stretch bg-white/10 shrink-0 hidden sm:block" aria-hidden />
+
+              <div className="sm:w-[9.5rem] md:w-36 sm:shrink-0 sm:pt-0 pt-3 border-t border-white/10 sm:border-t-0 flex flex-col justify-center">
+                <div className="flex items-center justify-between gap-2 text-[10px] sm:text-[11px] font-mono text-gray-500 uppercase tracking-wider mb-1.5">
+                  <span>National</span>
+                  <span className="text-[#A34A51] font-bold tabular-nums text-xs sm:text-sm">{nationalTensionPercent}%</span>
+                </div>
+                <div className="w-full h-2 rounded-full bg-white/10 overflow-hidden">
                   <div
                     className="h-full bg-gradient-to-r from-[#D97757] to-[#A34A51] transition-all duration-300"
                     style={{ width: `${nationalTensionPercent}%` }}
-                  ></div>
+                  />
                 </div>
                 {isAdmin && (
-                  <div className="mt-2 flex items-center gap-2">
+                  <div className="mt-2.5 flex items-center gap-1.5">
                     <input
                       type="number"
                       min={0}
                       max={100}
                       value={nationalTensionInput}
                       onChange={(e) => setNationalTensionInput(e.target.value)}
-                      className="w-20 bg-[#0B0F19] border border-white/15 rounded px-2 py-1 text-xs text-white outline-none focus:border-[#A34A51]"
+                      className="w-full min-w-0 bg-[#0B0F19] border border-white/12 rounded-md px-2 py-1 text-xs text-white outline-none focus:border-[#A34A51]"
                     />
                     <button
                       type="button"
                       onClick={() => handleUpdateNationalTensionPercent(Number(nationalTensionInput))}
-                      className="text-xs px-2.5 py-1 rounded border border-[#A34A51]/50 text-[#A34A51] hover:bg-[#A34A51] hover:text-white transition-colors"
+                      className="text-xs px-2.5 py-1 rounded-md border border-[#A34A51]/45 text-[#A34A51] hover:bg-[#A34A51] hover:text-white transition-colors shrink-0"
                     >
                       保存
                     </button>
@@ -1010,58 +1690,23 @@ export default function App() {
                 )}
               </div>
             </div>
-            {isAdmin && (
-              <div className="absolute right-4 top-4">
-                {isEditingDisplayDate ? (
-                  <div className="flex items-center gap-2 bg-black/50 p-2 rounded-lg border border-white/10">
-                    <input
-                      type="date"
-                      value={dateInput}
-                      onChange={(e) => setDateInput(e.target.value)}
-                      className="bg-[#0B0F19] border border-white/15 rounded px-2 py-1 text-xs text-white outline-none focus:border-[#A34A51]"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleUpdateDisplayDate}
-                      className="text-green-400 hover:text-green-300"
-                      title="保存日期"
-                    >
-                      <Check size={14} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDateInput(displayDate);
-                        setIsEditingDisplayDate(false);
-                      }}
-                      className="text-gray-400 hover:text-white"
-                      title="取消"
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setIsEditingDisplayDate(true)}
-                    className="p-2 rounded bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white transition-colors"
-                    title="修改日期"
-                  >
-                    <Edit2 size={14} />
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
+          </motion.div>
         </div>
 
         {/* Front Page News Board */}
         <section className="mb-10">
-          <div className="bg-[#131B2F] border border-[#A34A51]/30 rounded-2xl p-6 shadow-[0_0_30px_rgba(163,74,81,0.12)]">
-            <div className="flex items-center justify-between mb-5">
-              <div>
-                <h3 className="text-2xl font-serif font-bold text-white">头版新闻</h3>
-                <p className="text-xs text-gray-400 font-mono uppercase tracking-widest mt-1">Front Page News Feed</p>
+          <div className="bg-[#0F1424] border border-[#D4AF37]/25 rounded-2xl p-6 shadow-[0_0_36px_rgba(212,175,55,0.08)] relative overflow-hidden">
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-[#D4AF37]/35 to-transparent" />
+            <div className="flex items-center justify-between mb-5 gap-4 flex-wrap">
+              <div className="flex items-start gap-3">
+                <div className="mt-1 hidden sm:flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-[#D4AF37]/30 bg-[#D4AF37]/10 text-[#D4AF37]">
+                  <Newspaper size={20} strokeWidth={1.75} />
+                </div>
+                <div>
+                  <h3 className="text-2xl sm:text-3xl font-serif font-bold text-[#F5F0E6] tracking-tight">头版新闻</h3>
+                  <p className="text-xs text-[#D4AF37]/80 font-mono uppercase tracking-widest mt-1">Front Page · National desk</p>
+                  <div className="mt-2 h-0.5 w-16 rounded-full bg-gradient-to-r from-[#D4AF37]/80 to-transparent" />
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 {isAdmin && !isAddingNationalCrisis && !isFrontPageCollapsed && (
@@ -1085,21 +1730,22 @@ export default function App() {
             </div>
 
             {!isFrontPageCollapsed && nationalCrises.length > 0 ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                {nationalCrises.map(crisis => (
-                  <CrisisCard
-                    key={crisis.id}
-                    crisis={crisis}
-                    isAdmin={isAdmin}
-                    onUpdateTension={handleUpdateNationalTension}
-                    onDelete={requestDeleteNationalCrisis}
-                    onEdit={(c) => openEditNationalForm(c as NationalCrisis)}
-                    onOpenDetail={openNationalCrisisDetail}
-                  />
+              <div className="divide-y divide-white/[0.07] rounded-xl border border-white/[0.06] bg-black/20">
+                {nationalCrises.map((crisis) => (
+                  <Fragment key={crisis.id}>
+                    <FrontPageNewsRow
+                      crisis={crisis}
+                      isAdmin={isAdmin}
+                      onUpdateTension={handleUpdateNationalTension}
+                      onDelete={requestDeleteNationalCrisis}
+                      onEdit={openEditNationalForm}
+                      onOpenDetail={openNationalCrisisDetail}
+                    />
+                  </Fragment>
                 ))}
               </div>
             ) : !isFrontPageCollapsed ? (
-              <div className="border border-dashed border-white/15 rounded-xl p-8 text-center text-gray-500 font-mono text-sm">
+              <div className="border border-dashed border-[#D4AF37]/25 rounded-xl p-8 text-center text-gray-500 font-mono text-sm bg-black/15">
                 暂无全国性危机事件
               </div>
             ) : (
@@ -1174,6 +1820,26 @@ export default function App() {
               />
             </div>
 
+            <div className="mb-4">
+              <label className="block text-xs text-gray-400 mb-1">详情弹窗美术风格（仅本条头版稿）</label>
+              <select
+                value={nationalFormData.display_outlet}
+                onChange={(e) =>
+                  setNationalFormData({
+                    ...nationalFormData,
+                    display_outlet: e.target.value as NewsOutletSetting
+                  })
+                }
+                className="w-full max-w-xl bg-[#0B0F19] border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-[#A34A51] [color-scheme:dark]"
+              >
+                {DISPLAY_OUTLET_FORM_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <div className="mb-6">
               <label className="block text-xs text-gray-400 mb-1">详细描述</label>
               <textarea
@@ -1206,48 +1872,52 @@ export default function App() {
         {/* Dashboard Layout: Sidebar + Main Area */}
         <div className="flex flex-col lg:flex-row gap-8">
           {/* Sidebar: State Selector */}
-          <div className="w-full lg:w-1/3 xl:w-1/4 flex flex-col gap-3">
-            <div className="text-xs text-gray-500 font-mono uppercase tracking-widest mb-2 px-1">Select State</div>
-            {statesData.map(state => (
-              <button
-                key={state.id}
-                onClick={() => {
-                  setActiveStateId(state.id);
-                  closeForm();
-                }}
-                className={`w-full text-left p-4 rounded-xl border transition-all duration-300 flex items-center justify-between group
-                  ${activeStateId === state.id
-                    ? 'bg-[#A34A51]/20 border-[#A34A51] shadow-[0_0_15px_rgba(163,74,81,0.2)]'
-                    : 'bg-[#131B2F] border-white/5 hover:border-white/20 hover:bg-[#1a243d]'
-                  }`}
-              >
-                <div className="flex-1 min-w-0 pr-3">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className={`font-serif font-bold text-lg ${activeStateId === state.id ? 'text-[#A34A51]' : 'text-white'}`}>
-                      {state.stateName}
-                    </span>
-                    <span className="text-[10px] text-gray-500 font-mono uppercase">{state.stateEn}</span>
-                  </div>
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="text-gray-400 font-mono">{state.electoralVotes} EV</span>
-                  </div>
-                  <div className="mt-2">
-                    <div className="flex items-center justify-between text-[10px] font-mono text-gray-500 mb-1">
-                      <span>STATE TENSION</span>
-                      <span className="text-[#A34A51] font-bold">{state.tensionPercent}%</span>
+          <LayoutGroup id="state-sidebar-rank">
+            <motion.div layout className="w-full lg:w-1/3 xl:w-1/4 flex flex-col gap-3">
+              <div className="text-xs text-gray-500 font-mono uppercase tracking-widest mb-2 px-1">Select State</div>
+              {statesData.map(state => (
+                <motion.button
+                  key={state.id}
+                  layout="position"
+                  transition={stateListLayoutTransition}
+                  onClick={() => {
+                    setActiveStateId(state.id);
+                    closeForm();
+                  }}
+                  className={`w-full text-left p-4 rounded-xl border transition-colors duration-300 flex items-center justify-between group will-change-transform
+                    ${activeStateId === state.id
+                      ? 'bg-[#A34A51]/20 border-[#A34A51] shadow-[0_0_15px_rgba(163,74,81,0.2)]'
+                      : 'bg-[#131B2F] border-white/5 hover:border-white/20 hover:bg-[#1a243d]'
+                    }`}
+                >
+                  <div className="flex-1 min-w-0 pr-3">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className={`font-serif font-bold text-lg ${activeStateId === state.id ? 'text-[#A34A51]' : 'text-white'}`}>
+                        {state.stateName}
+                      </span>
+                      <span className="text-[10px] text-gray-500 font-mono uppercase">{state.stateEn}</span>
                     </div>
-                    <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
-                      <div
-                        className="h-full bg-gradient-to-r from-[#D97757] to-[#A34A51] transition-all duration-300"
-                        style={{ width: `${state.tensionPercent}%` }}
-                      ></div>
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="text-gray-400 font-mono">{state.electoralVotes} EV</span>
+                    </div>
+                    <div className="mt-2">
+                      <div className="flex items-center justify-between text-[10px] font-mono text-gray-500 mb-1">
+                        <span>STATE TENSION</span>
+                        <span className="text-[#A34A51] font-bold">{state.tensionPercent}%</span>
+                      </div>
+                      <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
+                        <div
+                          className="h-full bg-gradient-to-r from-[#D97757] to-[#A34A51] transition-all duration-300"
+                          style={{ width: `${state.tensionPercent}%` }}
+                        ></div>
+                      </div>
                     </div>
                   </div>
-                </div>
-                <ChevronRight size={18} className={`${activeStateId === state.id ? 'text-[#A34A51]' : 'text-gray-600 group-hover:text-gray-400'} transition-colors`} />
-              </button>
-            ))}
-          </div>
+                  <ChevronRight size={18} className={`${activeStateId === state.id ? 'text-[#A34A51]' : 'text-gray-600 group-hover:text-gray-400'} transition-colors`} />
+                </motion.button>
+              ))}
+            </motion.div>
+          </LayoutGroup>
 
           {/* Main Area: Active State Details */}
           <div className="w-full lg:w-2/3 xl:w-3/4">
@@ -1327,6 +1997,9 @@ export default function App() {
                     保存
                   </button>
                 </div>
+                <p className="text-[10px] text-gray-500 mt-2 leading-relaxed">
+                  左侧列表与排序仅使用此处保存的紧张度（0–100），与下方危机条目的等级不会自动互相覆盖。
+                </p>
               </div>
             )}
 
@@ -1394,6 +2067,22 @@ export default function App() {
                     placeholder="格式：MM-DD HH:mm（示例 11-04 14:15）"
                   />
                 </div>
+                <div className="mb-4">
+                  <label className="block text-xs text-gray-400 mb-1">详情弹窗美术风格（仅本条危机卡片）</label>
+                  <select
+                    value={formData.display_outlet}
+                    onChange={(e) =>
+                      setFormData({ ...formData, display_outlet: e.target.value as NewsOutletSetting })
+                    }
+                    className="w-full max-w-xl bg-[#0B0F19] border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-[#A34A51] [color-scheme:dark]"
+                  >
+                    {DISPLAY_OUTLET_FORM_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
                 <div className="mb-6">
                   <label className="block text-xs text-gray-400 mb-1">详细描述</label>
                   <textarea 
@@ -1443,52 +2132,167 @@ export default function App() {
 
       {selectedCrisisDetail && (
         <div
-          className="fixed inset-0 z-[120] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
-          onClick={() => setSelectedCrisisDetail(null)}
+          className="fixed left-0 right-0 top-[73px] bottom-0 z-[120] flex"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="crisis-detail-title"
         >
-          <div
-            className="w-full max-w-2xl bg-[#131B2F] border border-[#A34A51]/50 rounded-2xl shadow-[0_0_60px_rgba(163,74,81,0.25)] overflow-hidden"
+          <button
+            type="button"
+            className="flex-1 min-h-0 min-w-0 cursor-default border-0 bg-[#0B0F19]/50 backdrop-blur-[2px] p-0"
+            aria-label="关闭详情"
+            onClick={() => setSelectedCrisisDetail(null)}
+          />
+          {(() => {
+            const isNationalFront = selectedCrisisDetail.detailSource === 'national';
+            const o = selectedCrisisDetail.displayOutlet;
+            const theme = OUTLET_THEME[o];
+            const copy = OUTLET_COPY[o];
+            const tensionEn = tensionLabelEn(selectedCrisisDetail.tension);
+            const trendEn = trendLabelEn(selectedCrisisDetail.trend);
+            const stateMastSamunLine =
+              o === 'nyt' ? `SAMUN —${copy.styleLine}` : `SAMUN — ${copy.styleLine}`;
+            const stateKickerText = copy.stateHeaderKicker ?? stateMastSamunLine;
+            const stateTitleText = copy.stateHeaderTitle ?? copy.stateDeck;
+            return (
+          <motion.div
+            initial={{ x: '100%' }}
+            animate={{ x: 0 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 34 }}
+            className={`relative h-full w-full max-w-[min(100vw,36rem)] sm:max-w-[40rem] md:max-w-[44rem] lg:max-w-[48rem] xl:max-w-[52rem] shrink-0 overflow-y-auto overflow-x-hidden border-l-[3px] border-black/20 shadow-[-16px_0_48px_rgba(0,0,0,0.35)] antialiased ${theme.rootFont} ${theme.paper} text-stone-900 ${theme.shadow}`}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="p-5 border-b border-white/10 flex items-start justify-between gap-4">
-              <div>
-                <div className="text-[11px] text-gray-400 font-mono uppercase tracking-widest mb-2">
-                  {selectedCrisisDetail.scopeLabel}
+            <div
+              className={`pointer-events-none absolute inset-0 ${theme.paperNoise}`}
+              style={{
+                backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")`
+              }}
+              aria-hidden
+            />
+
+            <button
+              type="button"
+              onClick={() => setSelectedCrisisDetail(null)}
+              className={`absolute top-3 right-3 z-10 p-2 rounded-sm border transition-colors ${theme.closeBtn}`}
+              title="Close"
+            >
+              <X size={18} strokeWidth={2.25} />
+            </button>
+
+            <div className="relative pb-8">
+              {isNationalFront ? (
+                <>
+                  <div className={`relative -mx-px px-6 sm:px-10 pt-8 pb-6 ${theme.nationalBanner}`}>
+                    <div className={`flex flex-wrap items-center justify-between gap-3 pb-3 mb-4 ${theme.nationalBannerInnerRule} border-b`}>
+                      <div className={`flex items-center gap-2 ${theme.nationalMastMuted}`}>
+                        <Newspaper className="w-4 h-4 shrink-0" strokeWidth={2} />
+                        <span className="text-[10px] sm:text-[11px] font-bold tracking-[0.2em] uppercase font-mono">
+                          {o === 'nyt' ? `SAMUN —${copy.styleLine}` : `SAMUN — ${copy.styleLine}`}
+                        </span>
+                      </div>
+                      <span className={`text-[10px] font-mono uppercase tracking-[0.12em] ${theme.nationalMastMuted}`}>
+                        National · Front Page
+                      </span>
+                    </div>
+                    <p className={`${theme.nationalKicker} mb-2`}>
+                      {copy.natKicker}
+                    </p>
+                    <h1 className={theme.nationalHeadline}>
+                      {copy.natDeck}
+                    </h1>
+                  </div>
+
+                  <div className="px-6 sm:px-10 pt-8">
+                    <div className={`flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[11px] sm:text-xs font-mono mb-5 pb-3 ${theme.dateline}`}>
+                      <span className="inline-flex items-center gap-1.5 font-semibold">
+                        <Clock size={13} strokeWidth={2} />
+                        {selectedCrisisDetail.time}
+                      </span>
+                      <span className="opacity-40 hidden sm:inline">·</span>
+                      <span className="uppercase tracking-wider">
+                        {selectedCrisisDetail.scopeLabel}
+                      </span>
+                    </div>
+
+                    <h2 id="crisis-detail-title" className={`${theme.headlineNat} mb-6 sm:mb-7 [text-wrap:balance]`}>
+                      {selectedCrisisDetail.title}
+                    </h2>
+
+                    <div className="flex flex-wrap gap-2 mb-8 text-[10px] sm:text-[11px] font-mono font-bold uppercase tracking-wide">
+                      <span className={`px-2.5 py-1.5 ${theme.tagPrimary}`}>
+                        Tension · {tensionEn}
+                      </span>
+                      <span className={`px-2.5 py-1.5 ${theme.tagSecondary}`}>
+                        Trajectory · {trendEn}
+                      </span>
+                    </div>
+
+                    <p className="text-[11px] font-mono uppercase tracking-[0.14em] opacity-70 mb-2">
+                      Lead story (full column)
+                    </p>
+                    <div className={`whitespace-pre-wrap ${theme.bodyLeadWrap} ${theme.bodyNational} ${theme.borderLeftLead}`}>
+                      {selectedCrisisDetail.details}
+                    </div>
+
+                    <p className={`mt-8 sm:mt-10 pt-4 border-t-2 text-center text-[10px] font-mono tracking-[0.12em] ${theme.footer}`}>
+                      — 点击左侧区域或 ✕ 关闭 —
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <div className="px-6 sm:px-10 pt-10">
+                  <header className={`${theme.stateHeader} mb-6`}>
+                    <div
+                      className={`flex items-start gap-2.5 mb-1.5 ${theme.stateMastRow} ${theme.stateMastheadMuted}`}
+                    >
+                      <Newspaper className="w-4 h-4 shrink-0 opacity-80 mt-0.5" strokeWidth={2} />
+                      <span className="text-[9px] sm:text-[10px] font-semibold tracking-[0.2em] uppercase font-mono leading-snug opacity-[0.82]">
+                        {stateKickerText}
+                      </span>
+                    </div>
+                    <h1
+                      className={`text-[1.65rem] sm:text-[2.2rem] md:text-[2.35rem] tracking-tight leading-[1.12] font-bold mt-1 ${theme.stateTitle}`}
+                    >
+                      {stateTitleText}
+                    </h1>
+                    <div className={`mt-4 flex flex-wrap justify-center gap-x-4 gap-y-1 text-[11px] sm:text-xs font-mono border-y py-2 px-2 ${theme.dateline}`}>
+                      <span className="inline-flex items-center gap-1.5">
+                        <Clock size={13} strokeWidth={2} />
+                        {selectedCrisisDetail.time}
+                      </span>
+                      <span className="hidden sm:inline opacity-40">|</span>
+                      <span className="uppercase tracking-wider">
+                        {selectedCrisisDetail.scopeLabel}
+                      </span>
+                    </div>
+                  </header>
+
+                  <h2 id="crisis-detail-title" className={`${theme.headlineState} mb-5 sm:mb-6`}>
+                    {selectedCrisisDetail.title}
+                  </h2>
+
+                  <div className="flex flex-wrap items-center gap-2 mb-6 sm:mb-8 text-[10px] sm:text-[11px] font-mono uppercase tracking-wide">
+                    <span className={`px-2 py-1 ${theme.tagPrimary}`}>
+                      Tension · {tensionEn}
+                    </span>
+                    <span className={`px-2 py-1 ${theme.tagSecondary}`}>
+                      Trajectory · {trendEn}
+                    </span>
+                  </div>
+
+                  <div className={`whitespace-pre-wrap ${theme.bodyStateCols} ${theme.bodyState}`}>
+                    {selectedCrisisDetail.details}
+                  </div>
+
+                  <p className={`mt-8 sm:mt-10 pt-4 border-t-2 text-center text-[10px] font-mono tracking-[0.12em] ${theme.footer}`}>
+                    — 点击左侧区域或 ✕ 关闭 —
+                  </p>
                 </div>
-                <h4 className="text-xl font-serif font-bold text-white leading-snug">
-                  {selectedCrisisDetail.title}
-                </h4>
-              </div>
-              <button
-                type="button"
-                onClick={() => setSelectedCrisisDetail(null)}
-                className="text-gray-400 hover:text-white transition-colors"
-                title="关闭"
-              >
-                <X size={20} />
-              </button>
+              )}
             </div>
-            <div className="p-5 space-y-4">
-              <div className="flex items-center gap-3 text-xs font-mono text-gray-400">
-                <span className="inline-flex items-center gap-1.5 bg-black/30 px-2 py-1 rounded">
-                  <Clock size={12} />
-                  {selectedCrisisDetail.time}
-                </span>
-                <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded border ${getTensionColor(selectedCrisisDetail.tension)}`}>
-                  {selectedCrisisDetail.tension}
-                </span>
-                <span className="inline-flex items-center gap-1.5 bg-white/5 px-2 py-1 rounded">
-                  TREND
-                  {selectedCrisisDetail.trend === 'up' && <TrendingUp size={12} className="text-[#A34A51]" />}
-                  {selectedCrisisDetail.trend === 'down' && <TrendingUp size={12} className="text-green-500 rotate-180" />}
-                  {selectedCrisisDetail.trend === 'stable' && <Activity size={12} className="text-gray-400" />}
-                </span>
-              </div>
-              <div className="text-sm leading-relaxed text-gray-200 whitespace-pre-wrap">
-                {selectedCrisisDetail.details}
-              </div>
-            </div>
-          </div>
+          </motion.div>
+            );
+          })()}
         </div>
       )}
 

@@ -34,6 +34,7 @@ create table if not exists public.crises (
   details text not null,
   tension public.tension_level not null,
   trend public.trend_level not null,
+  display_outlet text not null default 'random',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -45,6 +46,7 @@ create table if not exists public.national_crises (
   details text not null,
   tension public.tension_level not null,
   trend public.trend_level not null,
+  display_outlet text not null default 'random',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -53,6 +55,7 @@ create table if not exists public.app_settings (
   id integer primary key,
   display_date date not null,
   national_tension_percent integer not null default 85 check (national_tension_percent >= 0 and national_tension_percent <= 100),
+  detail_modal_outlet text not null default 'random',
   updated_at timestamptz not null default now()
 );
 
@@ -88,6 +91,30 @@ begin
     where table_schema = 'public' and table_name = 'app_settings' and column_name = 'national_tension_percent'
   ) then
     alter table public.app_settings add column national_tension_percent integer;
+  end if;
+
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public' and table_name = 'app_settings' and column_name = 'detail_modal_outlet'
+  ) then
+    alter table public.app_settings add column detail_modal_outlet text not null default 'random';
+  end if;
+
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public' and table_name = 'crises' and column_name = 'display_outlet'
+  ) then
+    alter table public.crises add column display_outlet text not null default 'random';
+  end if;
+
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public' and table_name = 'national_crises' and column_name = 'display_outlet'
+  ) then
+    alter table public.national_crises add column display_outlet text not null default 'random';
   end if;
 end
 $$;
@@ -186,16 +213,17 @@ set
   display_date = excluded.display_date,
   national_tension_percent = excluded.national_tension_percent;
 
-insert into public.national_crises (id, time, title, details, tension, trend)
+insert into public.national_crises (id, time, title, details, tension, trend, display_outlet)
 values
-  ('nat-1', '11-05 20:00', '全国性选后法律战升级', '多个摇摆州同步出现法律挑战与重新计票诉讼，媒体和公众对最终认证流程高度关注。', '高', 'up')
+  ('nat-1', '11-05 20:00', '全国性选后法律战升级', '多个摇摆州同步出现法律挑战与重新计票诉讼，媒体和公众对最终认证流程高度关注。', '高', 'up', 'random')
 on conflict (id) do update
 set
   time = excluded.time,
   title = excluded.title,
   details = excluded.details,
   tension = excluded.tension,
-  trend = excluded.trend;
+  trend = excluded.trend,
+  display_outlet = excluded.display_outlet;
 
 insert into public.states (id, "stateName", "stateEn", "electoralVotes", "overallTension", tension_percent)
 values
