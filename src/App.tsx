@@ -1,7 +1,108 @@
-import React, { useState, useEffect, useRef, Fragment } from 'react';
-import { Activity, ShieldAlert, TrendingUp, ChevronRight, Clock, Plus, Edit2, Trash2, X, Check, LogOut, AlertTriangle, CalendarMinus, CalendarPlus, Newspaper } from 'lucide-react';
-import { motion, LayoutGroup } from 'motion/react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, Fragment } from 'react';
+import {
+  Activity,
+  ShieldAlert,
+  TrendingUp,
+  ChevronRight,
+  ChevronUp,
+  ChevronDown,
+  Clock,
+  Plus,
+  Edit2,
+  Trash2,
+  X,
+  Check,
+  LogOut,
+  AlertTriangle,
+  CalendarMinus,
+  CalendarPlus,
+  Newspaper
+} from 'lucide-react';
+import { motion, AnimatePresence, LayoutGroup } from 'motion/react';
 import { supabase } from './supabase';
+
+const supabaseErrorMessage = (err: unknown) => {
+  if (err && typeof err === 'object' && 'message' in err) {
+    const m = (err as { message: unknown }).message;
+    if (typeof m === 'string' && m.trim()) {
+      return m;
+    }
+  }
+  return '未知错误，请查看控制台或 Supabase 日志。';
+};
+
+/** 避免 `Date.now()` 连续碰撞导致主键冲突，进而插入失败或 React key 重复只显示部分行 */
+const newRowIdSuffix = () =>
+  typeof globalThis.crypto !== 'undefined' && typeof globalThis.crypto.randomUUID === 'function'
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+
+const newNationalCrisisRowId = () => `nat-${newRowIdSuffix()}`;
+const newStateCrisisRowId = (stateId: string) => `${stateId}-${newRowIdSuffix()}`;
+
+/** 与 Supabase API「Max rows」对齐；显式写出，避免误以为只拉到默认条数 */
+const TABLE_FETCH_LIMIT = 1000;
+
+/** 头版轮播每屏条数 */
+const FRONT_PAGE_PAGE_SIZE = 3;
+
+/** 竖向翻屏：满三条时固定视口高度 */
+const FRONT_PAGE_CAROUSEL_VIEWPORT_CLASS =
+  'h-[min(40rem,calc(100svh-9.5rem))] sm:h-[min(44rem,calc(100svh-8.5rem))] lg:h-[min(46rem,calc(100svh-8rem))]';
+
+/** 仅一条或两条时：总高度随内容，但不超过与满屏相同的最大高度 */
+const FRONT_PAGE_CAROUSEL_MAX_H_CLASS =
+  'max-h-[min(40rem,calc(100svh-9.5rem))] sm:max-h-[min(44rem,calc(100svh-8.5rem))] lg:max-h-[min(46rem,calc(100svh-8rem))]';
+
+const chunkArray = <T,>(arr: T[], size: number): T[][] => {
+  if (size < 1) {
+    return [arr];
+  }
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) {
+    out.push(arr.slice(i, i + size));
+  }
+  return out;
+};
+
+/** 超过约略字数时认为摘要装不下，显示「点击查看详情」（与 line-clamp 大致对齐） */
+const crisisCardTitleExceedsPreview = (s: string) => s.length > 40;
+const crisisCardDetailsExceedsPreview = (s: string) => s.length > 96;
+const frontPageTitleExceedsPreview = (s: string) => s.length > 44;
+const frontPageDetailsExceedsPreview = (s: string, mode: 'slot' | 'tile' | 'default') => {
+  const n = mode === 'slot' ? 56 : mode === 'tile' ? 95 : 118;
+  return s.length > n;
+};
+
+/** 州危机卡片与头版新闻行共用的砖块式入场 / 退场 / 布局弹簧 */
+const crisisBrickInitial = (index: number) => ({
+  opacity: 0,
+  y: 56,
+  scale: 0.94,
+  rotateZ: index % 2 === 0 ? -2 : 2
+});
+
+const crisisBrickAnimate = {
+  opacity: 1,
+  y: 0,
+  scale: 1,
+  rotateZ: 0
+};
+
+const crisisBrickExit = {
+  opacity: 0,
+  scale: 0.9,
+  y: -18,
+  transition: { duration: 0.4, ease: [0.22, 1, 0.36, 1] as [number, number, number, number] }
+};
+
+const crisisBrickTransition = {
+  type: 'spring' as const,
+  stiffness: 200,
+  damping: 38,
+  mass: 1.2,
+  layout: { type: 'spring' as const, stiffness: 180, damping: 40, mass: 1.15 }
+};
 
 type TensionLevel = '极高' | '高' | '中等' | '较低';
 
@@ -513,9 +614,12 @@ const CrisisCard = ({
   const isRecentlyCreated = createdAt > 0 && now - createdAt <= 10 * 60 * 1000;
   const isRecentlyUpdated = updatedAt > 0 && updatedAt > createdAt && now - updatedAt <= 10 * 60 * 1000;
   const shouldHighlightNewCard = isRecentlyCreated;
-  
+  const showDetailHint =
+    crisisCardTitleExceedsPreview(crisis.title) || crisisCardDetailsExceedsPreview(crisis.details);
+
   return (
-    <div className={`relative p-5 rounded-xl border transition-all duration-300 overflow-hidden group flex flex-col
+    <div
+      className={`relative flex min-h-[11.5rem] max-h-72 flex-col overflow-hidden rounded-xl border p-4 transition-all duration-300 group sm:p-5
       ${
         shouldHighlightNewCard
           ? 'bg-[#1A1520] border-[#A34A51]/60 shadow-[0_0_0_1px_rgba(163,74,81,0.18),0_8px_20px_rgba(0,0,0,0.25)] hover:border-[#A34A51]/80'
@@ -599,15 +703,26 @@ const CrisisCard = ({
         )}
       </div>
 
-      <h4 className={`font-bold text-lg mb-2 leading-snug pr-8 ${isCritical ? 'text-[#A34A51]' : 'text-white'}`}>
-        {crisis.title}
-      </h4>
+      <div className="flex min-h-0 flex-1 flex-col">
+        <h4
+          className={`mb-2 line-clamp-2 pr-8 text-base font-bold leading-snug sm:text-lg ${isCritical ? 'text-[#A34A51]' : 'text-white'}`}
+        >
+          {crisis.title}
+        </h4>
 
-      <p className="text-gray-400 text-sm leading-relaxed mb-6 flex-grow">
-        {crisis.details}
-      </p>
-      
-      <div className="mt-auto pt-4 border-t border-white/5">
+        <p className="line-clamp-4 min-h-0 text-sm leading-relaxed text-gray-400">
+          {crisis.details}
+        </p>
+
+        {showDetailHint ? (
+          <p className="mt-2 flex shrink-0 items-center gap-0.5 text-[10px] font-mono font-semibold tracking-wide text-[#A34A51]/95">
+            <ChevronRight size={12} strokeWidth={2.5} className="opacity-90" aria-hidden />
+            点击查看详情
+          </p>
+        ) : null}
+      </div>
+
+      <div className="mt-3 shrink-0 border-t border-white/5 pt-3">
         <TrendBadge trend={crisis.trend} size="md" />
       </div>
     </div>
@@ -622,6 +737,10 @@ interface FrontPageNewsRowProps {
   onDelete: (id: string) => void;
   onEdit: (crisis: NationalCrisis) => void;
   onOpenDetail: (crisis: CrisisBase) => void;
+  /** 头版三列轮播内：纵向小块排版（已弃用三列布局，保留兼容） */
+  variant?: 'default' | 'carouselTile';
+  /** 竖向三槽轮播内：与默认行样式相同，略压缩内边距以便一屏三条 */
+  slotInPage?: boolean;
 }
 
 function FrontPageNewsRow({
@@ -630,7 +749,9 @@ function FrontPageNewsRow({
   onUpdateTension,
   onDelete,
   onEdit,
-  onOpenDetail
+  onOpenDetail,
+  variant = 'default',
+  slotInPage = false
 }: FrontPageNewsRowProps) {
   const isCritical = crisis.tension === '极高';
   const createdAt = toEpoch(crisis.created_at);
@@ -638,16 +759,137 @@ function FrontPageNewsRow({
   const now = Date.now();
   const isRecentlyCreated = createdAt > 0 && now - createdAt <= 10 * 60 * 1000;
   const isRecentlyUpdated = updatedAt > 0 && updatedAt > createdAt && now - updatedAt <= 10 * 60 * 1000;
+  const isTile = variant === 'carouselTile';
+  const detailPreviewMode = slotInPage ? 'slot' : isTile ? 'tile' : 'default';
+  const showFrontPageDetailHint =
+    frontPageTitleExceedsPreview(crisis.title) ||
+    frontPageDetailsExceedsPreview(crisis.details, detailPreviewMode);
+
+  const adminOverlay = isAdmin ? (
+    <div className="absolute right-2 top-2 z-20 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onEdit(crisis);
+        }}
+        className="rounded-md border border-white/10 bg-[#0B0F19]/95 p-1.5 text-gray-300 transition-colors hover:border-white/25 hover:text-white"
+        title="编辑"
+      >
+        <Edit2 size={12} />
+      </button>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete(crisis.id);
+        }}
+        className="rounded-md border border-red-500/25 bg-[#0B0F19]/95 p-1.5 text-red-400 transition-colors hover:border-red-400/50 hover:text-red-300"
+        title="删除"
+      >
+        <Trash2 size={12} />
+      </button>
+    </div>
+  ) : null;
+
+  /** 三槽竖向轮播：参考头版横条卡片（左 ~20% 元数据 + 右正文） */
+  if (slotInPage) {
+    return (
+      <div
+        className={`group relative flex h-full min-h-0 w-full flex-row items-stretch gap-3 rounded-xl border px-3 py-2.5 transition-colors sm:gap-4 sm:px-4 sm:py-3 ${
+          isCritical
+            ? 'cursor-pointer border-[#A34A51]/45 bg-[#120a0e] shadow-[inset_0_0_0_1px_rgba(163,74,81,0.12)] hover:border-[#A34A51]/55'
+            : 'cursor-pointer border-[#D4AF37]/22 bg-[#090c14] hover:border-[#D4AF37]/38 hover:bg-[#0c1018]'
+        }`}
+        onClick={() => onOpenDetail(crisis)}
+      >
+        {adminOverlay}
+        <div className="flex w-[22%] min-w-[5.25rem] max-w-[6.75rem] shrink-0 flex-col gap-2 border-r border-white/[0.07] pr-2.5 sm:max-w-[7rem] sm:pr-3">
+          <div className="flex items-center gap-1.5 text-[10px] font-mono font-semibold uppercase tracking-[0.14em] text-[#D4AF37]">
+            <Newspaper size={13} className="shrink-0 opacity-90" strokeWidth={2} />
+            <span>HEADLINE</span>
+          </div>
+          <div className="flex w-fit items-center gap-1 rounded-md bg-black/35 px-2 py-1 font-mono text-[11px] text-gray-300">
+            <Clock size={12} className="shrink-0 opacity-80" />
+            {crisis.time}
+          </div>
+          {(isRecentlyCreated || isRecentlyUpdated) && (
+            <div
+              className={`w-fit rounded border px-2 py-0.5 text-[9px] font-bold tracking-wide ${
+                isRecentlyCreated
+                  ? 'border-[#A34A51]/55 bg-[#2A1A23] text-[#F1C9CF]'
+                  : 'border-[#D97757]/45 bg-[#D97757]/10 text-[#D97757]'
+              }`}
+            >
+              {isRecentlyCreated ? 'NEW' : 'UPDATED'}
+            </div>
+          )}
+        </div>
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col justify-between gap-2 pr-1">
+          <div className="min-h-0">
+            <h4
+              className={`font-serif text-[0.95rem] font-bold leading-snug tracking-tight line-clamp-2 sm:text-[1.05rem] ${
+                isCritical ? 'text-[#E8A8AD]' : 'text-[#F5F2EC]'
+              }`}
+            >
+              {crisis.title}
+            </h4>
+            <p className="mt-1.5 line-clamp-2 text-xs leading-relaxed text-gray-300/95 sm:text-[13px] font-sans">
+              {crisis.details}
+            </p>
+            {showFrontPageDetailHint ? (
+              <p className="mt-1.5 flex items-center gap-0.5 text-[10px] font-mono font-semibold tracking-wide text-[#D4AF37]/95">
+                <ChevronRight size={12} strokeWidth={2.5} className="opacity-90" aria-hidden />
+                点击查看详情
+              </p>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap items-center gap-2 border-t border-white/[0.06] pt-2">
+            {isAdmin ? (
+              <select
+                value={crisis.tension}
+                onChange={(e) => onUpdateTension(crisis.id, e.target.value as TensionLevel)}
+                onClick={(e) => e.stopPropagation()}
+                className={`cursor-pointer rounded-md border px-2 py-1 text-[10px] font-bold outline-none sm:text-[11px] ${getTensionColor(crisis.tension)}`}
+              >
+                <option value="极高" className="bg-[#0B0F19] text-[#A34A51]">
+                  极高
+                </option>
+                <option value="高" className="bg-[#0B0F19] text-[#D97757]">
+                  高
+                </option>
+                <option value="中等" className="bg-[#0B0F19] text-[#D4AF37]">
+                  中等
+                </option>
+                <option value="较低" className="bg-[#0B0F19] text-gray-400">
+                  较低
+                </option>
+              </select>
+            ) : (
+              <div
+                className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] font-bold sm:text-[11px] ${getTensionColor(crisis.tension)}`}
+              >
+                {crisis.tension === '极高' ? <ShieldAlert size={12} /> : <Activity size={12} />}
+                {crisis.tension}
+              </div>
+            )}
+            <TrendBadge trend={crisis.trend} size="sm" />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
-      className={`group relative flex flex-col lg:flex-row gap-4 lg:gap-8 pl-4 lg:pl-5 border-l-2 cursor-pointer rounded-r-lg transition-colors
+      className={`group relative flex ${isTile ? 'flex-col gap-3' : 'flex-col lg:flex-row gap-4 lg:gap-8'} pl-4 ${isTile ? 'lg:pl-4' : 'lg:pl-5'} border-l-2 cursor-pointer rounded-r-lg transition-colors
+        ${isTile ? 'h-full' : ''}
         ${isCritical ? 'border-l-[#A34A51] bg-[#A34A51]/[0.06]' : 'border-l-[#D4AF37]/45 bg-black/15'}
-        hover:bg-white/[0.04] py-5 px-3 sm:pr-4`}
+        ${isTile ? 'hover:bg-white/[0.04] py-4 px-2.5 sm:pr-3' : 'hover:bg-white/[0.04] py-5 px-3 sm:pr-4'}`}
       onClick={() => onOpenDetail(crisis)}
     >
       {isAdmin && (
-        <div className="absolute top-3 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-20">
+        <div className={`absolute ${isTile ? 'top-2 right-1.5' : 'top-3 right-2'} flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-20`}>
           <button
             type="button"
             onClick={(e) => {
@@ -673,10 +915,13 @@ function FrontPageNewsRow({
         </div>
       )}
 
-      <div className="shrink-0 lg:w-28 flex flex-row lg:flex-col gap-3 lg:gap-2 items-start">
+      <div
+        className={`shrink-0 flex flex-row ${isTile ? 'flex-wrap gap-2' : 'lg:w-28 lg:flex-col'} gap-3 lg:gap-2 items-start`}
+      >
         <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-[#D4AF37]/80">
-          <Newspaper size={13} className="shrink-0 opacity-90" />
-          <span>Headline</span>
+          <Newspaper size={isTile ? 12 : 13} className="shrink-0 opacity-90" />
+          {!isTile && <span>Headline</span>}
+          {isTile && <span className="sr-only">Headline</span>}
         </div>
         <div className="flex items-center gap-1.5 text-xs text-gray-400 font-mono bg-black/25 px-2 py-1 rounded-md">
           <Clock size={12} className="shrink-0" />
@@ -699,16 +944,26 @@ function FrontPageNewsRow({
         )}
       </div>
 
-      <div className="flex-1 min-w-0 pr-10 lg:pr-12">
+      <div className={`flex-1 min-w-0 ${isTile ? 'pr-8 lg:pr-9' : 'pr-10 lg:pr-12'}`}>
         <h4
-          className={`font-serif font-bold text-xl sm:text-2xl lg:text-[1.65rem] leading-snug tracking-tight ${isCritical ? 'text-[#E8A8AD]' : 'text-[#F5F2EC]'}`}
+          className={`font-serif font-bold leading-snug tracking-tight ${isCritical ? 'text-[#E8A8AD]' : 'text-[#F5F2EC]'} ${
+            isTile ? 'text-[0.95rem] sm:text-base line-clamp-3' : 'line-clamp-2 text-xl sm:text-2xl lg:text-[1.65rem]'
+          }`}
         >
           {crisis.title}
         </h4>
-        <p className="mt-2.5 text-sm sm:text-base text-gray-400 leading-relaxed line-clamp-2 lg:line-clamp-3 font-serif">
+        <p
+          className={`text-gray-400 leading-relaxed font-serif ${isTile ? 'mt-2 text-xs sm:text-[13px] line-clamp-4' : 'mt-2.5 line-clamp-3 text-sm sm:text-base'}`}
+        >
           {crisis.details}
         </p>
-        <div className="mt-4 flex flex-wrap items-center gap-3">
+        {showFrontPageDetailHint ? (
+          <p className="mt-2 flex items-center gap-0.5 text-[10px] font-mono font-semibold tracking-wide text-[#D4AF37]/90">
+            <ChevronRight size={12} strokeWidth={2.5} className="opacity-90" aria-hidden />
+            点击查看详情
+          </p>
+        ) : null}
+        <div className={`${isTile ? 'mt-3' : 'mt-4'} flex flex-wrap items-center gap-2 sm:gap-3`}>
           {isAdmin ? (
             <select
               value={crisis.tension}
@@ -774,6 +1029,8 @@ export default function App() {
   const [isAddingNationalCrisis, setIsAddingNationalCrisis] = useState(false);
   const [editingNationalCrisisId, setEditingNationalCrisisId] = useState<string | null>(null);
   const [isFrontPageCollapsed, setIsFrontPageCollapsed] = useState(false);
+  const frontPageCarouselRef = useRef<HTMLDivElement>(null);
+  const [frontPageCarouselPage, setFrontPageCarouselPage] = useState(0);
   const [selectedCrisisDetail, setSelectedCrisisDetail] = useState<CrisisDetailModalData | null>(null);
   const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<{ id: string; scope: 'state' | 'national' } | null>(null);
   const [nationalFormData, setNationalFormData] = useState({
@@ -797,6 +1054,26 @@ export default function App() {
     }
   };
 
+  const frontPagePages = useMemo(
+    () => chunkArray(nationalCrises, FRONT_PAGE_PAGE_SIZE),
+    [nationalCrises]
+  );
+
+  const scrollFrontPageTo = useCallback((index: number, behavior: ScrollBehavior = 'smooth') => {
+    const el = frontPageCarouselRef.current;
+    if (!el || frontPagePages.length === 0) {
+      return;
+    }
+    const clamped = Math.max(0, Math.min(index, frontPagePages.length - 1));
+    const pages = el.querySelectorAll<HTMLElement>('[data-fp-page]');
+    let top = 0;
+    for (let i = 0; i < clamped; i++) {
+      top += pages[i]?.offsetHeight ?? 0;
+    }
+    el.scrollTo({ top, behavior });
+    setFrontPageCarouselPage(clamped);
+  }, [frontPagePages.length]);
+
   const formatCrisisTime = () => {
     const now = new Date();
     return `${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
@@ -807,6 +1084,11 @@ export default function App() {
       fetchData();
     }
   }, [isAuthenticated]);
+
+  useEffect(() => {
+    const maxPage = Math.max(0, frontPagePages.length - 1);
+    setFrontPageCarouselPage((p) => Math.min(Math.max(0, p), maxPage));
+  }, [frontPagePages.length]);
 
   useEffect(() => {
     activeStateIdRef.current = activeStateId;
@@ -847,10 +1129,10 @@ export default function App() {
         { data: settings, error: settingsError },
         { data: national, error: nationalError }
       ] = await Promise.all([
-        supabase.from('states').select('*'),
-        supabase.from('crises').select('*'),
+        supabase.from('states').select('*').limit(TABLE_FETCH_LIMIT),
+        supabase.from('crises').select('*').limit(TABLE_FETCH_LIMIT),
         supabase.from('app_settings').select('display_date, national_tension_percent').eq('id', 1).maybeSingle(),
-        supabase.from('national_crises').select('*')
+        supabase.from('national_crises').select('*').limit(TABLE_FETCH_LIMIT)
       ]);
 
       if (statesError) {
@@ -895,20 +1177,30 @@ export default function App() {
         .sort((a: any, b: any) => sortStatesByTension(a, b)) as StateData[];
 
       setStatesData(grouped);
+      const nationalRows = ((national || []) as any[]).map((c) => ({
+        ...c,
+        display_outlet: parseNewsOutletSetting(c.display_outlet)
+      })) as NationalCrisis[];
+      const nationalIdDup = nationalRows.reduce((acc, c) => {
+        acc.set(c.id, (acc.get(c.id) ?? 0) + 1);
+        return acc;
+      }, new Map<string, number>());
+      const dupIds = [...nationalIdDup.entries()].filter(([, n]) => n > 1).map(([id]) => id);
+      if (dupIds.length > 0) {
+        console.warn(
+          '[national_crises] 存在重复的 id，界面可能只稳定显示其中一部分。请在 Supabase 修正主键后刷新：',
+          dupIds
+        );
+      }
       setNationalCrises(
-        ((national || []) as any[])
-          .map((c) => ({
-            ...c,
-            display_outlet: parseNewsOutletSetting(c.display_outlet)
-          }))
-          .sort((a, b) => {
-            const aSort = Math.max(toEpoch(a.updated_at), toEpoch(a.created_at));
-            const bSort = Math.max(toEpoch(b.updated_at), toEpoch(b.created_at));
-            if (bSort !== aSort) {
-              return bSort - aSort;
-            }
-            return b.id.localeCompare(a.id);
-          }) as NationalCrisis[]
+        nationalRows.sort((a, b) => {
+          const aSort = Math.max(toEpoch(a.updated_at), toEpoch(a.created_at));
+          const bSort = Math.max(toEpoch(b.updated_at), toEpoch(b.created_at));
+          if (bSort !== aSort) {
+            return bSort - aSort;
+          }
+          return b.id.localeCompare(a.id);
+        })
       );
       const currentDate = settings?.display_date || getTodayIsoDate();
       if (!timelineDataHydratedRef.current) {
@@ -1081,6 +1373,7 @@ export default function App() {
       scheduleDataRefresh(120);
     } catch (err) {
       console.error('Failed to update tension', err);
+      alert(`更新紧张度失败：${supabaseErrorMessage(err)}`);
     }
   };
 
@@ -1147,6 +1440,7 @@ export default function App() {
       scheduleDataRefresh(120);
     } catch (err) {
       console.error('Failed to update national tension', err);
+      alert(`更新头版紧张度失败：${supabaseErrorMessage(err)}`);
     }
   };
 
@@ -1202,6 +1496,7 @@ export default function App() {
   }, [activeStateId, activeState?.tensionPercent]);
 
   const openEditForm = (crisis: Crisis) => {
+    setSelectedCrisisDetail((prev) => (prev?.id === crisis.id && prev.detailSource === 'state' ? null : prev));
     setEditingCrisisId(crisis.id);
     setFormData({
       time: crisis.time,
@@ -1233,6 +1528,7 @@ export default function App() {
   };
 
   const openEditNationalForm = (crisis: NationalCrisis) => {
+    setSelectedCrisisDetail((prev) => (prev?.id === crisis.id && prev.detailSource === 'national' ? null : prev));
     setEditingNationalCrisisId(crisis.id);
     setNationalFormData({
       time: crisis.time,
@@ -1265,60 +1561,102 @@ export default function App() {
 
   const handleSubmitForm = async (e: React.FormEvent) => {
     e.preventDefault();
+    const crisisIdBeingEdited = editingCrisisId;
+    const payload = { ...formData };
     try {
-      if (editingCrisisId) {
-        const { error } = await supabase
+      if (crisisIdBeingEdited) {
+        const { data, error } = await supabase
           .from('crises')
-          .update(formData)
-          .eq('id', editingCrisisId);
+          .update(payload)
+          .eq('id', crisisIdBeingEdited)
+          .select('id');
         if (error) {
           throw error;
         }
+        if (!data?.length) {
+          alert(
+            '保存失败：没有更新到任何记录。\n\n请确认该危机仍存在；若在 Supabase 报错与列名有关，请在 SQL Editor 执行仓库里的 supabase-schema.sql 中的迁移（含 display_outlet）。'
+          );
+          return;
+        }
       } else {
-        const { error } = await supabase
-          .from('crises')
-          .insert({
-            id: `${activeStateId}-${Date.now()}`,
-            state_id: activeStateId,
-            ...formData
-          });
+        const { error } = await supabase.from('crises').insert({
+          id: newStateCrisisRowId(activeStateId),
+          state_id: activeStateId,
+          ...payload
+        });
         if (error) {
           throw error;
         }
       }
       closeForm();
-      scheduleDataRefresh(120);
+      setSelectedCrisisDetail((prev) => {
+        if (!prev || prev.detailSource !== 'state') {
+          return prev;
+        }
+        if (!crisisIdBeingEdited || prev.id !== crisisIdBeingEdited) {
+          return prev;
+        }
+        return {
+          ...prev,
+          ...payload,
+          displayOutlet: resolveNewsOutletSetting(payload.display_outlet ?? 'random')
+        };
+      });
+      await fetchData();
     } catch (err) {
       console.error('Failed to save crisis', err);
+      alert(`保存危机失败：${supabaseErrorMessage(err)}`);
     }
   };
 
   const handleSubmitNationalForm = async (e: React.FormEvent) => {
     e.preventDefault();
+    const crisisIdBeingEdited = editingNationalCrisisId;
+    const payload = { ...nationalFormData };
     try {
-      if (editingNationalCrisisId) {
-        const { error } = await supabase
+      if (crisisIdBeingEdited) {
+        const { data, error } = await supabase
           .from('national_crises')
-          .update(nationalFormData)
-          .eq('id', editingNationalCrisisId);
+          .update(payload)
+          .eq('id', crisisIdBeingEdited)
+          .select('id');
         if (error) {
           throw error;
         }
+        if (!data?.length) {
+          alert(
+            '保存失败：没有更新到任何头版记录。\n\n请确认记录仍存在，并已执行数据库迁移（national_crises.display_outlet 等）。'
+          );
+          return;
+        }
       } else {
-        const { error } = await supabase
-          .from('national_crises')
-          .insert({
-            id: `nat-${Date.now()}`,
-            ...nationalFormData
-          });
+        const { error } = await supabase.from('national_crises').insert({
+          id: newNationalCrisisRowId(),
+          ...payload
+        });
         if (error) {
           throw error;
         }
       }
       closeNationalForm();
-      scheduleDataRefresh(120);
+      setSelectedCrisisDetail((prev) => {
+        if (!prev || prev.detailSource !== 'national') {
+          return prev;
+        }
+        if (!crisisIdBeingEdited || prev.id !== crisisIdBeingEdited) {
+          return prev;
+        }
+        return {
+          ...prev,
+          ...payload,
+          displayOutlet: resolveNewsOutletSetting(payload.display_outlet ?? 'random')
+        };
+      });
+      await fetchData();
     } catch (err) {
       console.error('Failed to save national crisis', err);
+      alert(`保存全国危机失败：${supabaseErrorMessage(err)}`);
     }
   };
 
@@ -1730,19 +2068,120 @@ export default function App() {
             </div>
 
             {!isFrontPageCollapsed && nationalCrises.length > 0 ? (
-              <div className="divide-y divide-white/[0.07] rounded-xl border border-white/[0.06] bg-black/20">
-                {nationalCrises.map((crisis) => (
-                  <Fragment key={crisis.id}>
-                    <FrontPageNewsRow
-                      crisis={crisis}
-                      isAdmin={isAdmin}
-                      onUpdateTension={handleUpdateNationalTension}
-                      onDelete={requestDeleteNationalCrisis}
-                      onEdit={openEditNationalForm}
-                      onOpenDetail={openNationalCrisisDetail}
-                    />
-                  </Fragment>
-                ))}
+              <div className="relative pb-1">
+                {(() => {
+                  const singlePageOnly = frontPagePages.length === 1;
+                  const fewerThanThreeTotal = nationalCrises.length < FRONT_PAGE_PAGE_SIZE;
+                  const scrollAreaClass =
+                    singlePageOnly && fewerThanThreeTotal
+                      ? `${FRONT_PAGE_CAROUSEL_MAX_H_CLASS} h-auto min-h-0`
+                      : FRONT_PAGE_CAROUSEL_VIEWPORT_CLASS;
+                  return (
+                <div
+                  ref={frontPageCarouselRef}
+                  onScroll={() => {
+                    const el = frontPageCarouselRef.current;
+                    if (!el) {
+                      return;
+                    }
+                    const pages = el.querySelectorAll<HTMLElement>('[data-fp-page]');
+                    if (pages.length === 0) {
+                      return;
+                    }
+                    const st = el.scrollTop;
+                    let acc = 0;
+                    let idx = 0;
+                    for (let i = 0; i < pages.length; i++) {
+                      if (st + 2 >= acc) {
+                        idx = i;
+                      }
+                      acc += pages[i]!.offsetHeight;
+                    }
+                    setFrontPageCarouselPage(Math.min(Math.max(0, idx), frontPagePages.length - 1));
+                  }}
+                  className={`flex flex-col overflow-y-auto overflow-x-hidden scroll-smooth snap-y snap-mandatory rounded-xl border border-white/[0.06] bg-black/20 [scrollbar-width:thin] [scrollbar-color:rgba(212,175,55,0.4)_transparent] ${scrollAreaClass}`}
+                >
+                  <LayoutGroup id="national-front-page-crises">
+                    {frontPagePages.map((page, pageIndex) => {
+                      const fullSlot = page.length === FRONT_PAGE_PAGE_SIZE;
+                      return (
+                      <div
+                        key={`fp-page-${pageIndex}`}
+                        data-fp-page
+                        className={`flex shrink-0 snap-start flex-col gap-2.5 overflow-hidden box-border px-2 py-2 sm:gap-3 sm:px-3 sm:py-3 ${
+                          fullSlot ? FRONT_PAGE_CAROUSEL_VIEWPORT_CLASS : 'h-auto min-h-0'
+                        }`}
+                        style={{ perspective: '1400px' }}
+                      >
+                        <AnimatePresence initial={false} mode="popLayout">
+                          {page.map((crisis, index) => {
+                            const brickIndex = pageIndex * FRONT_PAGE_PAGE_SIZE + index;
+                            return (
+                              <motion.div
+                                key={crisis.id}
+                                layout
+                                initial={crisisBrickInitial(brickIndex)}
+                                animate={crisisBrickAnimate}
+                                exit={crisisBrickExit}
+                                transition={crisisBrickTransition}
+                                style={{ transformOrigin: '50% 100%' }}
+                                className={`flex min-h-0 min-w-0 flex-col ${fullSlot ? 'flex-1' : 'flex-none'}`}
+                              >
+                                <FrontPageNewsRow
+                                  crisis={crisis}
+                                  isAdmin={isAdmin}
+                                  slotInPage
+                                  onUpdateTension={handleUpdateNationalTension}
+                                  onDelete={requestDeleteNationalCrisis}
+                                  onEdit={openEditNationalForm}
+                                  onOpenDetail={openNationalCrisisDetail}
+                                />
+                              </motion.div>
+                            );
+                          })}
+                        </AnimatePresence>
+                      </div>
+                    );
+                    })}
+                  </LayoutGroup>
+                </div>
+                  );
+                })()}
+                {frontPagePages.length > 1 ? (
+                  <>
+                    <div className="pointer-events-none absolute inset-y-3 right-2 z-10 flex flex-col items-center gap-2">
+                      <button
+                        type="button"
+                        aria-label="上一排头版新闻"
+                        onClick={() => scrollFrontPageTo(frontPageCarouselPage - 1)}
+                        className="pointer-events-auto rounded-lg border border-[#D4AF37]/40 bg-[#0B0F19]/92 p-2 text-[#D4AF37] shadow-md backdrop-blur-sm transition-colors hover:bg-[#D4AF37]/15 disabled:pointer-events-none disabled:opacity-25"
+                        disabled={frontPageCarouselPage <= 0}
+                      >
+                        <ChevronUp size={20} strokeWidth={2} />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="下一排头版新闻"
+                        onClick={() => scrollFrontPageTo(frontPageCarouselPage + 1)}
+                        className="pointer-events-auto rounded-lg border border-[#D4AF37]/40 bg-[#0B0F19]/92 p-2 text-[#D4AF37] shadow-md backdrop-blur-sm transition-colors hover:bg-[#D4AF37]/15 disabled:pointer-events-none disabled:opacity-25"
+                        disabled={frontPageCarouselPage >= frontPagePages.length - 1}
+                      >
+                        <ChevronDown size={20} strokeWidth={2} />
+                      </button>
+                    </div>
+                    <div className="mt-3 flex justify-center gap-2">
+                      {frontPagePages.map((_, i) => (
+                        <button
+                          key={`fp-dot-${i}`}
+                          type="button"
+                          aria-label={`头版第 ${i + 1} 屏`}
+                          onClick={() => scrollFrontPageTo(i)}
+                          className={`h-2 rounded-full transition-all ${i === frontPageCarouselPage ? 'w-6 bg-[#D4AF37]' : 'w-2 bg-[#D4AF37]/35 hover:bg-[#D4AF37]/55'}`}
+                        />
+                      ))}
+                    </div>
+                  </>
+                ) : null}
               </div>
             ) : !isFrontPageCollapsed ? (
               <div className="border border-dashed border-[#D4AF37]/25 rounded-xl p-8 text-center text-gray-500 font-mono text-sm bg-black/15">
@@ -1755,7 +2194,7 @@ export default function App() {
         </section>
 
         {/* Admin Add/Edit National Crisis Form */}
-        {isAdmin && isAddingNationalCrisis && !isFrontPageCollapsed && (
+        {isAdmin && isAddingNationalCrisis && (
           <form onSubmit={handleSubmitNationalForm} className="bg-[#131B2F] border border-[#A34A51] rounded-2xl p-6 mb-10 shadow-[0_0_30px_rgba(163,74,81,0.2)] relative z-10">
             <div className="flex justify-between items-center mb-6">
               <h4 className="text-lg font-bold text-white flex items-center gap-2">
@@ -2112,20 +2551,37 @@ export default function App() {
               </form>
             )}
 
-            {/* Crises Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-              {activeState.crises.map(crisis => (
-                <CrisisCard 
-                  key={crisis.id} 
-                  crisis={crisis} 
-                  isAdmin={isAdmin} 
-                  onUpdateTension={handleUpdateTension}
-                  onDelete={requestDeleteCrisis}
-                  onEdit={openEditForm}
-                  onOpenDetail={openStateCrisisDetail}
-                />
-              ))}
-            </div>
+            {/* Crises Grid — 新增卡片砖块式落位 + 布局重排 */}
+            <LayoutGroup id={`state-crises-${activeState.id}`}>
+              <div
+                className="grid grid-cols-1 gap-5 md:grid-cols-2"
+                style={{ perspective: '1400px' }}
+              >
+                <AnimatePresence initial={false} mode="popLayout">
+                  {activeState.crises.map((crisis, index) => (
+                    <motion.div
+                      key={crisis.id}
+                      layout
+                      initial={crisisBrickInitial(index)}
+                      animate={crisisBrickAnimate}
+                      exit={crisisBrickExit}
+                      transition={crisisBrickTransition}
+                      style={{ transformOrigin: '50% 100%' }}
+                      className="min-w-0"
+                    >
+                      <CrisisCard
+                        crisis={crisis}
+                        isAdmin={isAdmin}
+                        onUpdateTension={handleUpdateTension}
+                        onDelete={requestDeleteCrisis}
+                        onEdit={openEditForm}
+                        onOpenDetail={openStateCrisisDetail}
+                      />
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
+              </div>
+            </LayoutGroup>
           </div>
         </div>
       </main>
