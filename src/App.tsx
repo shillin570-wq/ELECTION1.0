@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback, Fragment } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, Fragment } from 'react';
 import {
   Activity,
   ShieldAlert,
@@ -16,7 +16,12 @@ import {
   AlertTriangle,
   CalendarMinus,
   CalendarPlus,
-  Newspaper
+  Newspaper,
+  Star,
+  Radar,
+  GripVertical,
+  Play,
+  Pause
 } from 'lucide-react';
 import { motion, AnimatePresence, LayoutGroup } from 'motion/react';
 import { supabase } from './supabase';
@@ -109,14 +114,27 @@ const crisisBrickTransition = {
 type TensionLevel = '极高' | '高' | '中等' | '较低';
 
 /** 每条危机单独保存；random 表示打开详情时抽签。 */
-type NewsOutletSetting = 'random' | 'nyt' | 'cnn' | 'wapo' | 'reuters';
-type NewsOutletResolved = 'nyt' | 'cnn' | 'wapo' | 'reuters';
+type NewsOutletSetting = 'random' | 'nyt' | 'cnn' | 'wapo' | 'reuters' | 'wsj' | 'economist';
+type NewsOutletResolved = 'nyt' | 'cnn' | 'wapo' | 'reuters' | 'wsj' | 'economist';
 
-const NEWS_OUTLET_POOL: NewsOutletResolved[] = ['nyt', 'cnn', 'wapo', 'reuters'];
+const NEWS_OUTLET_POOL: NewsOutletResolved[] = ['nyt', 'cnn', 'wapo', 'reuters', 'wsj', 'economist'];
+
+const TRACKED_CRISIS_STORAGE_KEY = 'samun-election-tracked-crises-v1';
+const TRACKER_POS_STORAGE_KEY = 'samun-election-tracker-pos-v1';
+
+type TrackedCrisisRef = { scope: 'national' | 'state'; id: string };
 
 const parseNewsOutletSetting = (raw: unknown): NewsOutletSetting => {
   const v = typeof raw === 'string' ? raw : '';
-  if (v === 'random' || v === 'nyt' || v === 'cnn' || v === 'wapo' || v === 'reuters') {
+  if (
+    v === 'random' ||
+    v === 'nyt' ||
+    v === 'cnn' ||
+    v === 'wapo' ||
+    v === 'reuters' ||
+    v === 'wsj' ||
+    v === 'economist'
+  ) {
     return v;
   }
   return 'random';
@@ -134,7 +152,9 @@ const DISPLAY_OUTLET_FORM_OPTIONS: { value: NewsOutletSetting; label: string }[]
   { value: 'nyt', label: '纽约时报风 · Newsreader 米色' },
   { value: 'cnn', label: 'CNN 风 · Barlow 红黑' },
   { value: 'wapo', label: '华盛顿邮报风 · Baskerville 蓝' },
-  { value: 'reuters', label: '路透社风 · 灰底 Plex Mono' }
+  { value: 'reuters', label: '路透社风 · 灰底 Plex Mono' },
+  { value: 'wsj', label: '华尔街日报风 · Source Serif 奶油栏线' },
+  { value: 'economist', label: '经济学人风 · Fraunces 红顶杂志' }
 ];
 
 interface CrisisBase {
@@ -180,6 +200,9 @@ interface StateData {
 
 const getTodayIsoDate = () => new Date().toISOString().slice(0, 10);
 
+/** 现实 40 分钟 = 程序 3 天 → 每推进 1 个程序日约需 800_000ms */
+const REAL_MS_PER_PROGRAM_DAY = (40 * 60 * 1000) / 3;
+
 const addDaysIso = (isoDate: string, deltaDays: number) => {
   const d = new Date(`${isoDate}T12:00:00`);
   if (Number.isNaN(d.getTime())) {
@@ -187,6 +210,27 @@ const addDaysIso = (isoDate: string, deltaDays: number) => {
   }
   d.setDate(d.getDate() + deltaDays);
   return d.toISOString().slice(0, 10);
+};
+
+/** 按整天推进：未满一整天不改日期 */
+const computeFlowDisplayDate = (
+  baseDate: string,
+  flowing: boolean,
+  flowStartedAt: string | null | undefined
+) => {
+  const base = baseDate || getTodayIsoDate();
+  if (!flowing || !flowStartedAt) {
+    return base;
+  }
+  const startedMs = new Date(flowStartedAt).getTime();
+  if (Number.isNaN(startedMs)) {
+    return base;
+  }
+  const daysAdvanced = Math.floor((Date.now() - startedMs) / REAL_MS_PER_PROGRAM_DAY);
+  if (daysAdvanced <= 0) {
+    return base;
+  }
+  return addDaysIso(base, daysAdvanced);
 };
 
 const formatDateParts = (isoDate: string) => {
@@ -331,6 +375,22 @@ const OUTLET_COPY: Record<
     natKicker: 'REFILE · verified lines only',
     natDeck: 'WM / National bulletin',
     stateDeck: 'State line / wire'
+  },
+  wsj: {
+    styleLine: 'Review & Outlook — ledger edition',
+    natKicker: "What's News · Americas",
+    natDeck: 'National Report — Markets & Politics',
+    stateDeck: 'Regional bureau — state notes',
+    stateHeaderKicker: 'SAMUN — Review & Outlook',
+    stateHeaderTitle: 'state notes — regional bureau'
+  },
+  economist: {
+    styleLine: 'Leaders — weekly edition',
+    natKicker: 'World in brief · United States',
+    natDeck: 'United States — A special report',
+    stateDeck: 'United States — States in detail',
+    stateHeaderKicker: 'SAMUN — Leaders',
+    stateHeaderTitle: 'states in detail'
   }
 };
 
@@ -507,6 +567,78 @@ const OUTLET_THEME: Record<
     footer: 'border-[#1c2e1f]/40 text-[#3d5c3d] text-[9px]',
     headlineNat: 'font-bold text-lg sm:text-[1.35rem] text-[#0a120c] leading-snug normal-case',
     headlineState: 'font-bold text-base sm:text-lg text-[#0a120c] leading-snug normal-case'
+  },
+  wsj: {
+    rootFont: "font-['Source Serif 4',Georgia,'Times New Roman',serif]",
+    shell: 'w-full max-w-[42rem]',
+    paper: 'bg-[#f4f0e8]',
+    paperNoise: 'opacity-[0.08]',
+    border: 'border border-[#1a1a1a]/55',
+    shadow: 'shadow-[0_18px_48px_rgba(26,26,26,0.22)]',
+    closeBtn: 'border-[#1a1a1a]/35 bg-[#f4f0e8]/95 text-[#111] hover:border-[#8b1538]',
+    backdrop: 'bg-[#1c1814]/90',
+    nationalBanner:
+      'bg-[#f4f0e8] text-[#111] border-b-[3px] border-double border-[#1a1a1a] pt-7 pb-6',
+    nationalBannerInnerRule: 'border-[#8b1538]/35',
+    nationalKicker:
+      "text-[#5c3d45] text-[11px] sm:text-xs font-semibold tracking-[0.18em] uppercase font-['Source Sans 3',sans-serif]",
+    nationalHeadline:
+      "font-semibold text-2xl sm:text-[2.05rem] leading-[1.08] text-[#111] font-['Source Serif 4',serif]",
+    nationalMastMuted: 'text-[#6b5c58]',
+    borderLeftLead: 'border-l-[3px] border-[#8b1538] bg-white/70 pl-5 py-4',
+    bodyLeadWrap: 'max-w-[28rem]',
+    stateHeader:
+      'border-b-[3px] border-double border-[#1a1a1a] pb-6 text-center bg-[#ebe6dc]/90',
+    stateMastRow: 'justify-center',
+    stateMastheadMuted: 'text-[#6b5c58]',
+    stateTitle: 'text-[#111] font-semibold',
+    dateline: 'text-[#4a3f3c] border-b border-[#1a1a1a]/25',
+    bodyNational:
+      "text-[1.04rem] sm:text-[1.1rem] leading-[1.95] text-[#1c1410] text-justify font-['Source Serif 4',serif]",
+    bodyState:
+      "text-[0.97rem] sm:text-[1.04rem] leading-[1.9] text-[#1f1814] text-left font-['Source Serif 4',serif]",
+    bodyStateCols: 'columns-1 w-full',
+    tagPrimary: 'rounded-sm border border-[#8b1538] bg-[#ebe6dc] text-[#3d1218] font-semibold text-[10px]',
+    tagSecondary: 'rounded-sm border border-[#1a1a1a]/30 bg-white text-[#2a201c] text-[10px]',
+    footer: 'border-[#1a1a1a]/20 text-[#6b5c58]',
+    headlineNat:
+      "font-semibold text-[1.75rem] sm:text-[2.35rem] text-[#111] leading-[1.08] font-['Source Serif 4',serif]",
+    headlineState:
+      "font-semibold text-[1.55rem] sm:text-[2rem] text-[#111] leading-[1.1] font-['Source Serif 4',serif]"
+  },
+  economist: {
+    rootFont: "font-['Source Sans 3',system-ui,sans-serif]",
+    shell: 'w-full max-w-[40rem]',
+    paper: 'bg-[#fbfaf7]',
+    paperNoise: 'opacity-[0.04]',
+    border: 'border-t-[14px] border-[#e3120b] border-x border-b border-[#dcd7cf]',
+    shadow: 'shadow-[0_24px_50px_rgba(0,0,0,0.14)]',
+    closeBtn: 'border-[#e3120b]/40 bg-[#fbfaf7]/95 text-[#111] hover:border-[#e3120b]',
+    backdrop: 'bg-[#1a1512]/88',
+    nationalBanner: 'bg-[#fbfaf7] text-[#111] border-b-4 border-[#e3120b] pt-6 pb-7',
+    nationalBannerInnerRule: 'border-[#c9c4bc]/80',
+    nationalKicker:
+      "text-[#e3120b] text-[10px] sm:text-[11px] font-bold tracking-[0.22em] uppercase font-['Source Sans 3',sans-serif]",
+    nationalHeadline:
+      "font-extrabold text-xl sm:text-[2.15rem] leading-[1.05] text-[#111] font-['Fraunces',serif]",
+    nationalMastMuted: 'text-[#6b6560]',
+    borderLeftLead: 'border-l-4 border-[#e3120b] bg-white pl-5 py-4',
+    bodyLeadWrap: '',
+    stateHeader: 'border-b-4 border-[#e3120b] pb-6 text-center bg-white/90',
+    stateMastRow: 'justify-center',
+    stateMastheadMuted: 'text-[#e3120b]',
+    stateTitle: "text-[#111] font-extrabold font-['Fraunces',serif]",
+    dateline: 'text-[#3d3a37] border-y border-[#e8e3db] bg-[#f3f1ed]',
+    bodyNational:
+      'text-[1.02rem] sm:text-[1.1rem] leading-[1.88] text-[#1f1c1a] text-left font-normal',
+    bodyState: 'text-[0.97rem] sm:text-[1.05rem] leading-[1.86] text-[#1f1c1a] text-left',
+    bodyStateCols: 'columns-1 w-full',
+    tagPrimary: 'rounded-full border border-[#e3120b] bg-[#fde8e6] text-[#8b0f0a] font-bold text-[10px]',
+    tagSecondary: 'rounded-full border border-[#111]/15 bg-white text-[#111] font-bold text-[10px]',
+    footer: 'border-[#dcd7cf] text-[#6b6560]',
+    headlineNat:
+      "font-extrabold text-[1.85rem] sm:text-[2.65rem] text-[#111] leading-[1.04] font-['Fraunces',serif]",
+    headlineState: "font-extrabold text-[1.5rem] sm:text-[2.1rem] text-[#111] leading-[1.08] font-['Fraunces',serif]"
   }
 };
 
@@ -599,7 +731,9 @@ const CrisisCard = ({
   onUpdateTension,
   onDelete,
   onEdit,
-  onOpenDetail
+  onOpenDetail,
+  isTracked,
+  onToggleTrack
 }: { 
   crisis: CrisisBase; 
   isAdmin: boolean; 
@@ -607,6 +741,8 @@ const CrisisCard = ({
   onDelete: (id: string) => void;
   onEdit: (crisis: CrisisBase) => void;
   onOpenDetail: (crisis: CrisisBase) => void;
+  isTracked: boolean;
+  onToggleTrack: () => void;
   key?: string | number 
 }) => {
   const isCritical = crisis.tension === '极高';
@@ -639,6 +775,22 @@ const CrisisCard = ({
         <div className="absolute top-0 left-0 w-1 h-full bg-[#A34A51]"></div>
       )}
 
+      <button
+        type="button"
+        className={`absolute top-2 left-2 z-30 rounded-md border p-1.5 transition-colors ${
+          isTracked
+            ? 'border-[#D4AF37]/60 bg-[#D4AF37]/15 text-[#D4AF37]'
+            : 'border-white/10 bg-black/35 text-gray-400 hover:border-white/25 hover:text-white'
+        }`}
+        title={isTracked ? '取消关注' : '关注此危机'}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleTrack();
+        }}
+      >
+        <Star size={14} strokeWidth={2} className={isTracked ? 'fill-[#D4AF37]/45' : ''} />
+      </button>
+
       {isAdmin && (
         <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-20">
           <button 
@@ -664,7 +816,7 @@ const CrisisCard = ({
         </div>
       )}
 
-      <div className="flex justify-between items-start mb-4">
+      <div className="flex justify-between items-start mb-4 pl-9">
         <div className="flex items-center gap-1.5 text-xs text-gray-400 font-mono bg-black/20 px-2 py-1 rounded">
           <Clock size={12} />
           {crisis.time}
@@ -739,6 +891,8 @@ interface FrontPageNewsRowProps {
   onDelete: (id: string) => void;
   onEdit: (crisis: NationalCrisis) => void;
   onOpenDetail: (crisis: CrisisBase) => void;
+  isTracked: boolean;
+  onToggleTrack: () => void;
   /** 头版三列轮播内：纵向小块排版（已弃用三列布局，保留兼容） */
   variant?: 'default' | 'carouselTile';
   /** 竖向三槽轮播内：与默认行样式相同，略压缩内边距以便一屏三条 */
@@ -754,6 +908,8 @@ function FrontPageNewsRow({
   onDelete,
   onEdit,
   onOpenDetail,
+  isTracked,
+  onToggleTrack,
   variant = 'default',
   slotInPage = false,
   fillSlotHeight = false
@@ -769,6 +925,24 @@ function FrontPageNewsRow({
   const showFrontPageDetailHint =
     frontPageTitleExceedsPreview(crisis.title) ||
     frontPageDetailsExceedsPreview(crisis.details, detailPreviewMode);
+
+  const trackStar = (
+    <button
+      type="button"
+      className={`absolute top-2 left-2 z-30 rounded-md border p-1.5 transition-colors ${
+        isTracked
+          ? 'border-[#D4AF37]/55 bg-[#0B0F19]/95 text-[#D4AF37]'
+          : 'border-white/12 bg-[#0B0F19]/80 text-gray-500 hover:border-[#D4AF37]/35 hover:text-white'
+      }`}
+      title={isTracked ? '取消关注' : '关注此危机'}
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggleTrack();
+      }}
+    >
+      <Star size={13} strokeWidth={2} className={isTracked ? 'fill-[#D4AF37]/35' : ''} />
+    </button>
+  );
 
   const adminOverlay = isAdmin ? (
     <div className="absolute right-2 top-2 z-20 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
@@ -810,8 +984,9 @@ function FrontPageNewsRow({
         }`}
         onClick={() => onOpenDetail(crisis)}
       >
+        {trackStar}
         {adminOverlay}
-        <div className="flex w-[22%] min-w-[5rem] max-w-[6.5rem] shrink-0 flex-col gap-1.5 border-r border-white/[0.07] pr-2 sm:max-w-[6.75rem] sm:pr-2.5">
+        <div className="flex w-[22%] min-w-[5rem] max-w-[6.5rem] shrink-0 flex-col gap-1.5 border-r border-white/[0.07] pr-2 pl-7 sm:max-w-[6.75rem] sm:pr-2.5">
           <div className="flex items-center gap-1 text-[9px] font-mono font-semibold uppercase tracking-[0.12em] text-[#D4AF37] sm:text-[10px]">
             <Newspaper size={12} className="shrink-0 opacity-90 sm:w-[13px] sm:h-[13px]" strokeWidth={2} />
             <span>HEADLINE</span>
@@ -899,6 +1074,7 @@ function FrontPageNewsRow({
         ${isTile ? 'hover:bg-white/[0.04] py-4 px-2.5 sm:pr-3' : 'hover:bg-white/[0.04] py-5 px-3 sm:pr-4'}`}
       onClick={() => onOpenDetail(crisis)}
     >
+      {trackStar}
       {isAdmin && (
         <div className={`absolute ${isTile ? 'top-2 right-1.5' : 'top-3 right-2'} flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-20`}>
           <button
@@ -927,7 +1103,7 @@ function FrontPageNewsRow({
       )}
 
       <div
-        className={`shrink-0 flex flex-row ${isTile ? 'flex-wrap gap-2' : 'lg:w-28 lg:flex-col'} gap-3 lg:gap-2 items-start`}
+        className={`shrink-0 flex flex-row ${isTile ? 'flex-wrap gap-2 pl-7' : 'pl-7 lg:w-28 lg:flex-col'} gap-3 lg:gap-2 items-start`}
       >
         <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-[#D4AF37]/80">
           <Newspaper size={isTile ? 12 : 13} className="shrink-0 opacity-90" />
@@ -1030,19 +1206,74 @@ export default function App() {
     display_outlet: 'random' as NewsOutletSetting
   });
   const [displayDate, setDisplayDate] = useState<string>(getTodayIsoDate());
+  /** DB 锚点日：流动时 display_date 由此 + 流逝整天数算出 */
+  const [timelineBaseDate, setTimelineBaseDate] = useState<string>(getTodayIsoDate());
+  const [timelineFlowing, setTimelineFlowing] = useState(false);
+  const [timelineFlowStartedAt, setTimelineFlowStartedAt] = useState<string | null>(null);
   const [nationalTensionPercent, setNationalTensionPercent] = useState<number>(85);
   const [nationalTensionInput, setNationalTensionInput] = useState<string>('85');
   const [dateInput, setDateInput] = useState<string>(getTodayIsoDate());
   const [timelinePulse, setTimelinePulse] = useState(false);
   const timelinePulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timelineTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timelineDataHydratedRef = useRef(false);
   const prevDisplayDateForFxRef = useRef(displayDate);
+  const timelineBaseDateRef = useRef(timelineBaseDate);
+  const timelineFlowingRef = useRef(timelineFlowing);
+  const timelineFlowStartedAtRef = useRef(timelineFlowStartedAt);
+  timelineBaseDateRef.current = timelineBaseDate;
+  timelineFlowingRef.current = timelineFlowing;
+  timelineFlowStartedAtRef.current = timelineFlowStartedAt;
   const [isAddingNationalCrisis, setIsAddingNationalCrisis] = useState(false);
   const [editingNationalCrisisId, setEditingNationalCrisisId] = useState<string | null>(null);
   const [isFrontPageCollapsed, setIsFrontPageCollapsed] = useState(false);
   const frontPageCarouselRef = useRef<HTMLDivElement>(null);
   const [frontPageCarouselPage, setFrontPageCarouselPage] = useState(0);
   const [selectedCrisisDetail, setSelectedCrisisDetail] = useState<CrisisDetailModalData | null>(null);
+  const [trackedCrisisRefs, setTrackedCrisisRefs] = useState<TrackedCrisisRef[]>(() => {
+    try {
+      const raw = localStorage.getItem(TRACKED_CRISIS_STORAGE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((x): x is TrackedCrisisRef => {
+        if (!x || typeof x !== 'object') return false;
+        const o = x as Record<string, unknown>;
+        return (o.scope === 'national' || o.scope === 'state') && typeof o.id === 'string';
+      });
+    } catch {
+      return [];
+    }
+  });
+  const [trackerExpanded, setTrackerExpanded] = useState(true);
+  const [trackerPanelPos, setTrackerPanelPos] = useState(() => {
+    try {
+      const raw = localStorage.getItem(TRACKER_POS_STORAGE_KEY);
+      if (!raw) return { x: 0, y: 0 };
+      const p = JSON.parse(raw) as unknown;
+      if (
+        p &&
+        typeof p === 'object' &&
+        typeof (p as { x: unknown }).x === 'number' &&
+        typeof (p as { y: unknown }).y === 'number'
+      ) {
+        return { x: (p as { x: number }).x, y: (p as { y: number }).y };
+      }
+    } catch {
+      /* ignore */
+    }
+    return { x: 0, y: 0 };
+  });
+  const trackerPanelRef = useRef<HTMLDivElement>(null);
+  const trackerPanelPosRef = useRef({ x: 0, y: 0 });
+  const trackerDragRef = useRef<{
+    startX: number;
+    startY: number;
+    ox: number;
+    oy: number;
+  } | null>(null);
+  const trackerRafRef = useRef<number | null>(null);
+  const trackerPendingPointerRef = useRef({ x: 0, y: 0 });
   const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<{ id: string; scope: 'state' | 'national' } | null>(null);
   const [nationalFormData, setNationalFormData] = useState({
     time: '',
@@ -1137,14 +1368,40 @@ export default function App() {
       const [
         { data: states, error: statesError },
         { data: crises, error: crisesError },
-        { data: settings, error: settingsError },
+        settingsResult,
         { data: national, error: nationalError }
       ] = await Promise.all([
         supabase.from('states').select('*').limit(TABLE_FETCH_LIMIT),
         supabase.from('crises').select('*').limit(TABLE_FETCH_LIMIT),
-        supabase.from('app_settings').select('display_date, national_tension_percent').eq('id', 1).maybeSingle(),
+        supabase
+          .from('app_settings')
+          .select('display_date, national_tension_percent, timeline_flowing, timeline_flow_started_at')
+          .eq('id', 1)
+          .maybeSingle(),
         supabase.from('national_crises').select('*').limit(TABLE_FETCH_LIMIT)
       ]);
+
+      let settings = settingsResult.data as {
+        display_date?: string;
+        national_tension_percent?: number;
+        timeline_flowing?: boolean;
+        timeline_flow_started_at?: string | null;
+      } | null;
+      let settingsError = settingsResult.error;
+
+      // 旧库尚未跑 timeline 迁移时回退查询
+      if (settingsError) {
+        const msg = `${settingsError.message || ''} ${settingsError.code || ''}`.toLowerCase();
+        if (msg.includes('timeline_flow') || msg.includes('column') || settingsError.code === '42703') {
+          const fallback = await supabase
+            .from('app_settings')
+            .select('display_date, national_tension_percent')
+            .eq('id', 1)
+            .maybeSingle();
+          settings = fallback.data;
+          settingsError = fallback.error;
+        }
+      }
 
       if (statesError) {
         throw statesError;
@@ -1213,11 +1470,26 @@ export default function App() {
           return b.id.localeCompare(a.id);
         })
       );
-      const currentDate = settings?.display_date || getTodayIsoDate();
+      setTrackedCrisisRefs((prev) =>
+        prev.filter((ref) => {
+          if (ref.scope === 'national') {
+            return nationalRows.some((c) => c.id === ref.id);
+          }
+          return grouped.some((s) => s.crises.some((c) => c.id === ref.id));
+        })
+      );
+      const baseDate = settings?.display_date || getTodayIsoDate();
+      const flowing = Boolean(settings?.timeline_flowing);
+      const startedAt =
+        typeof settings?.timeline_flow_started_at === 'string' ? settings.timeline_flow_started_at : null;
+      const currentDate = computeFlowDisplayDate(baseDate, flowing, startedAt);
       if (!timelineDataHydratedRef.current) {
         timelineDataHydratedRef.current = true;
         prevDisplayDateForFxRef.current = currentDate;
       }
+      setTimelineBaseDate(baseDate);
+      setTimelineFlowing(flowing);
+      setTimelineFlowStartedAt(startedAt);
       setDisplayDate(currentDate);
       setNationalTensionPercent(
         clampPercent(
@@ -1291,21 +1563,22 @@ export default function App() {
 
   const handleUpdateDisplayDate = async (nextDateOverride?: string) => {
     const nextDate = nextDateOverride ?? dateInput ?? getTodayIsoDate();
+    const nowIso = new Date().toISOString();
     try {
-      const { error } = await supabase
-        .from('app_settings')
-        .upsert(
-          {
-            id: 1,
-            display_date: nextDate,
-            national_tension_percent: nationalTensionPercent
-          },
-          { onConflict: 'id' }
-        );
+      const payload: Record<string, unknown> = {
+        id: 1,
+        display_date: nextDate,
+        national_tension_percent: nationalTensionPercent,
+        timeline_flowing: timelineFlowing,
+        timeline_flow_started_at: timelineFlowing ? nowIso : null
+      };
+      const { error } = await supabase.from('app_settings').upsert(payload, { onConflict: 'id' });
 
       if (error) {
         throw error;
       }
+      setTimelineBaseDate(nextDate);
+      setTimelineFlowStartedAt(timelineFlowing ? nowIso : null);
       setDisplayDate(nextDate);
       setDateInput(nextDate);
     } catch (err) {
@@ -1319,6 +1592,65 @@ export default function App() {
     const base = displayDate || dateInput || getTodayIsoDate();
     const next = addDaysIso(base, deltaDays);
     void handleUpdateDisplayDate(next);
+  };
+
+  const handleStartTimelineFlow = async () => {
+    const nowIso = new Date().toISOString();
+    const anchorDate = displayDate || dateInput || getTodayIsoDate();
+    try {
+      const { error } = await supabase.from('app_settings').upsert(
+        {
+          id: 1,
+          display_date: anchorDate,
+          national_tension_percent: nationalTensionPercent,
+          timeline_flowing: true,
+          timeline_flow_started_at: nowIso
+        },
+        { onConflict: 'id' }
+      );
+      if (error) {
+        throw error;
+      }
+      setTimelineBaseDate(anchorDate);
+      setTimelineFlowing(true);
+      setTimelineFlowStartedAt(nowIso);
+      setDisplayDate(anchorDate);
+      setDateInput(anchorDate);
+    } catch (err) {
+      console.error('Failed to start timeline flow', err);
+      alert(`开始时间流动失败：${supabaseErrorMessage(err)}`);
+    }
+  };
+
+  const handlePauseTimelineFlow = async () => {
+    const frozenDate = computeFlowDisplayDate(
+      timelineBaseDate,
+      timelineFlowing,
+      timelineFlowStartedAt
+    );
+    try {
+      const { error } = await supabase.from('app_settings').upsert(
+        {
+          id: 1,
+          display_date: frozenDate,
+          national_tension_percent: nationalTensionPercent,
+          timeline_flowing: false,
+          timeline_flow_started_at: null
+        },
+        { onConflict: 'id' }
+      );
+      if (error) {
+        throw error;
+      }
+      setTimelineBaseDate(frozenDate);
+      setTimelineFlowing(false);
+      setTimelineFlowStartedAt(null);
+      setDisplayDate(frozenDate);
+      setDateInput(frozenDate);
+    } catch (err) {
+      console.error('Failed to pause timeline flow', err);
+      alert(`暂停时间流动失败：${supabaseErrorMessage(err)}`);
+    }
   };
 
   useEffect(() => {
@@ -1345,6 +1677,36 @@ export default function App() {
     };
   }, [displayDate]);
 
+  /** 流动中：按整天推进本地显示日期（全端各自按锚点计算，保持同步） */
+  useEffect(() => {
+    if (!isAuthenticated || !timelineFlowing) {
+      if (timelineTickRef.current) {
+        clearInterval(timelineTickRef.current);
+        timelineTickRef.current = null;
+      }
+      return;
+    }
+
+    const tick = () => {
+      const next = computeFlowDisplayDate(
+        timelineBaseDateRef.current,
+        timelineFlowingRef.current,
+        timelineFlowStartedAtRef.current
+      );
+      setDisplayDate((prev) => (prev === next ? prev : next));
+      setDateInput((prev) => (prev === next ? prev : next));
+    };
+
+    tick();
+    timelineTickRef.current = setInterval(tick, 1000);
+    return () => {
+      if (timelineTickRef.current) {
+        clearInterval(timelineTickRef.current);
+        timelineTickRef.current = null;
+      }
+    };
+  }, [isAuthenticated, timelineFlowing, timelineBaseDate, timelineFlowStartedAt]);
+
   const handleUpdateNationalTensionPercent = async (value: number) => {
     const nextValue = clampPercent(value);
     try {
@@ -1353,8 +1715,10 @@ export default function App() {
         .upsert(
           {
             id: 1,
-            display_date: displayDate || getTodayIsoDate(),
-            national_tension_percent: nextValue
+            display_date: timelineBaseDate || displayDate || getTodayIsoDate(),
+            national_tension_percent: nextValue,
+            timeline_flowing: timelineFlowing,
+            timeline_flow_started_at: timelineFlowStartedAt
           },
           { onConflict: 'id' }
         );
@@ -1479,9 +1843,10 @@ export default function App() {
   };
 
   const openStateCrisisDetail = (crisis: CrisisBase) => {
+    const holder = statesData.find((s) => s.crises.some((c) => c.id === crisis.id));
     setSelectedCrisisDetail({
       ...crisis,
-      scopeLabel: activeState?.stateName || 'State desk',
+      scopeLabel: holder?.stateName || activeState?.stateName || 'State desk',
       detailSource: 'state',
       displayOutlet: outletForCrisis(crisis)
     });
@@ -1496,6 +1861,71 @@ export default function App() {
     });
   };
 
+  const toggleTrackedCrisis = useCallback((ref: TrackedCrisisRef) => {
+    setTrackedCrisisRefs((prev) => {
+      const hit = prev.findIndex((r) => r.scope === ref.scope && r.id === ref.id);
+      if (hit >= 0) {
+        const next = [...prev];
+        next.splice(hit, 1);
+        return next;
+      }
+      return [...prev, ref];
+    });
+  }, []);
+
+  const openTrackedCrisisDetail = (ref: TrackedCrisisRef) => {
+    if (ref.scope === 'national') {
+      const c = nationalCrises.find((x) => x.id === ref.id);
+      if (c) openNationalCrisisDetail(c);
+      return;
+    }
+    for (const s of statesData) {
+      const c = s.crises.find((x) => x.id === ref.id);
+      if (c) {
+        setActiveStateId(s.id);
+        openStateCrisisDetail(c);
+        return;
+      }
+    }
+  };
+
+  const trackedCrisisItems = useMemo(() => {
+    return trackedCrisisRefs
+      .map((ref) => {
+        if (ref.scope === 'national') {
+          const c = nationalCrises.find((x) => x.id === ref.id);
+          if (!c) return null;
+          return { ref, crisis: c as CrisisBase, label: '头版' as const };
+        }
+        for (const s of statesData) {
+          const c = s.crises.find((x) => x.id === ref.id);
+          if (c) {
+            return { ref, crisis: c as CrisisBase, label: s.stateName };
+          }
+        }
+        return null;
+      })
+      .filter(
+        (x): x is { ref: TrackedCrisisRef; crisis: CrisisBase; label: string } => x !== null
+      );
+  }, [trackedCrisisRefs, nationalCrises, statesData]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(TRACKED_CRISIS_STORAGE_KEY, JSON.stringify(trackedCrisisRefs));
+    } catch {
+      /* ignore */
+    }
+  }, [trackedCrisisRefs]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(TRACKER_POS_STORAGE_KEY, JSON.stringify(trackerPanelPos));
+    } catch {
+      /* ignore */
+    }
+  }, [trackerPanelPos]);
+
   useEffect(() => {
     setNationalTensionInput(String(nationalTensionPercent));
   }, [nationalTensionPercent]);
@@ -1505,6 +1935,82 @@ export default function App() {
       setStateTensionInput(String(activeState.tensionPercent));
     }
   }, [activeStateId, activeState?.tensionPercent]);
+
+  /** 拖动中只改 DOM + ref，不在 pointermove 里 setState，避免整页重绘卡顿。 */
+  const applyTrackerDragMove = useCallback((clientX: number, clientY: number) => {
+    const d = trackerDragRef.current;
+    const el = trackerPanelRef.current;
+    if (!d || !el) return;
+    let nx = d.ox + (clientX - d.startX);
+    let ny = d.oy + (clientY - d.startY);
+    el.style.willChange = 'transform';
+    el.style.transform = `translate3d(${nx}px, ${ny}px, 0)`;
+    el.style.transformOrigin = 'bottom right';
+    const rect = el.getBoundingClientRect();
+    const pad = 8;
+    if (rect.left < pad) nx += pad - rect.left;
+    if (rect.right > window.innerWidth - pad) nx += window.innerWidth - pad - rect.right;
+    if (rect.top < pad) ny += pad - rect.top;
+    if (rect.bottom > window.innerHeight - pad) ny += window.innerHeight - pad - rect.bottom;
+    el.style.transform = `translate3d(${nx}px, ${ny}px, 0)`;
+    trackerPanelPosRef.current = { x: nx, y: ny };
+  }, []);
+
+  const runTrackerDragFrame = useCallback(() => {
+    trackerRafRef.current = null;
+    if (!trackerDragRef.current) return;
+    const p = trackerPendingPointerRef.current;
+    applyTrackerDragMove(p.x, p.y);
+  }, [applyTrackerDragMove]);
+
+  const handleTrackerDragPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    trackerDragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      ox: trackerPanelPosRef.current.x,
+      oy: trackerPanelPosRef.current.y
+    };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }, []);
+
+  const handleTrackerDragPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!trackerDragRef.current) return;
+      trackerPendingPointerRef.current = { x: e.clientX, y: e.clientY };
+      if (trackerRafRef.current !== null) return;
+      trackerRafRef.current = requestAnimationFrame(runTrackerDragFrame);
+    },
+    [runTrackerDragFrame]
+  );
+
+  const handleTrackerDragPointerUp = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!trackerDragRef.current) return;
+      if (trackerRafRef.current !== null) {
+        cancelAnimationFrame(trackerRafRef.current);
+        trackerRafRef.current = null;
+      }
+      applyTrackerDragMove(e.clientX, e.clientY);
+      const next = { ...trackerPanelPosRef.current };
+      trackerDragRef.current = null;
+      setTrackerPanelPos(next);
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+    },
+    [applyTrackerDragMove]
+  );
+
+  useLayoutEffect(() => {
+    const el = trackerPanelRef.current;
+    if (!el || trackerDragRef.current) return;
+    el.style.transform = `translate3d(${trackerPanelPos.x}px, ${trackerPanelPos.y}px, 0)`;
+    el.style.transformOrigin = 'bottom right';
+    el.style.willChange = 'auto';
+  }, [trackerPanelPos]);
 
   const openEditForm = (crisis: Crisis) => {
     setSelectedCrisisDetail((prev) => (prev?.id === crisis.id && prev.detailSource === 'state' ? null : prev));
@@ -1670,6 +2176,10 @@ export default function App() {
       alert(`保存全国危机失败：${supabaseErrorMessage(err)}`);
     }
   };
+
+  if (!trackerDragRef.current) {
+    trackerPanelPosRef.current = trackerPanelPos;
+  }
 
   if (!isAuthenticated) {
     return (
@@ -1863,11 +2373,25 @@ export default function App() {
                 className="text-xs text-gray-400 uppercase tracking-wider flex items-center justify-end gap-2 mt-0.5"
               >
                 <motion.span
-                  className="w-2 h-2 rounded-full bg-[#A34A51]"
-                  animate={timelinePulse ? { scale: [1, 1.45, 1], opacity: [1, 0.55, 1] } : { scale: 1, opacity: 1 }}
-                  transition={{ duration: 0.55, repeat: timelinePulse ? 2 : 0, ease: 'easeInOut' }}
+                  className={`w-2 h-2 rounded-full ${timelineFlowing ? 'bg-[#A34A51]' : 'bg-gray-500'}`}
+                  animate={
+                    timelineFlowing
+                      ? timelinePulse
+                        ? { scale: [1, 1.45, 1], opacity: [1, 0.55, 1] }
+                        : { scale: [1, 1.25, 1], opacity: [1, 0.65, 1] }
+                      : { scale: 1, opacity: 0.7 }
+                  }
+                  transition={
+                    timelineFlowing
+                      ? {
+                          duration: timelinePulse ? 0.55 : 1.4,
+                          repeat: timelinePulse ? 2 : Infinity,
+                          ease: 'easeInOut'
+                        }
+                      : { duration: 0.3 }
+                  }
                 />
-                Live Timeline
+                {timelineFlowing ? 'Timeline Flowing' : 'Timeline Paused'}
               </motion.div>
             </div>
           </div>
@@ -1969,7 +2493,18 @@ export default function App() {
 
                   {isAdmin && (
                     <div className="mt-3 pt-3 border-t border-white/10">
-                      <div className="text-[10px] sm:text-[11px] text-gray-500 font-mono uppercase tracking-wider mb-2">时间线 · 即时同步</div>
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                        <div className="text-[10px] sm:text-[11px] text-gray-500 font-mono uppercase tracking-wider">
+                          时间线 · 40分钟=3天
+                        </div>
+                        <div
+                          className={`text-[10px] font-mono uppercase tracking-wider ${
+                            timelineFlowing ? 'text-[#A34A51]' : 'text-gray-500'
+                          }`}
+                        >
+                          {timelineFlowing ? '流动中' : '已暂停'}
+                        </div>
+                      </div>
                       <div className="flex flex-wrap items-center gap-2">
                         <button
                           type="button"
@@ -1999,6 +2534,32 @@ export default function App() {
                           <span>+1</span>
                           <CalendarPlus size={15} className="text-[#A34A51]" />
                         </button>
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        {timelineFlowing ? (
+                          <button
+                            type="button"
+                            title="暂停时间流动"
+                            onClick={() => void handlePauseTimelineFlow()}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-amber-500/35 bg-amber-500/10 text-xs font-mono text-amber-100 hover:border-amber-400/55 hover:bg-amber-500/15 transition-colors"
+                          >
+                            <Pause size={14} />
+                            <span>暂停流动</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            title="开始时间流动"
+                            onClick={() => void handleStartTimelineFlow()}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-emerald-500/35 bg-emerald-500/10 text-xs font-mono text-emerald-100 hover:border-emerald-400/55 hover:bg-emerald-500/15 transition-colors"
+                          >
+                            <Play size={14} />
+                            <span>开始流动</span>
+                          </button>
+                        )}
+                        <span className="text-[10px] text-gray-500 font-mono">
+                          约每 {Math.round(REAL_MS_PER_PROGRAM_DAY / 60000)} 分钟推进 1 天
+                        </span>
                       </div>
                     </div>
                   )}
@@ -2147,6 +2708,12 @@ export default function App() {
                                   isAdmin={isAdmin}
                                   slotInPage
                                   fillSlotHeight={fillSlot}
+                                  isTracked={trackedCrisisRefs.some(
+                                    (r) => r.scope === 'national' && r.id === crisis.id
+                                  )}
+                                  onToggleTrack={() =>
+                                    toggleTrackedCrisis({ scope: 'national', id: crisis.id })
+                                  }
                                   onUpdateTension={handleUpdateNationalTension}
                                   onDelete={requestDeleteNationalCrisis}
                                   onEdit={openEditNationalForm}
@@ -2588,6 +3155,12 @@ export default function App() {
                       <CrisisCard
                         crisis={crisis}
                         isAdmin={isAdmin}
+                        isTracked={trackedCrisisRefs.some(
+                          (r) => r.scope === 'state' && r.id === crisis.id
+                        )}
+                        onToggleTrack={() =>
+                          toggleTrackedCrisis({ scope: 'state', id: crisis.id })
+                        }
                         onUpdateTension={handleUpdateTension}
                         onDelete={requestDeleteCrisis}
                         onEdit={openEditForm}
@@ -2767,6 +3340,89 @@ export default function App() {
           })()}
         </div>
       )}
+
+      {isAuthenticated ? (
+        <div
+          ref={trackerPanelRef}
+          className="fixed bottom-4 right-4 z-[110] flex max-w-[min(100vw-1.5rem,20rem)] flex-col items-end gap-2 pointer-events-none [backface-visibility:hidden]"
+        >
+          <div className="pointer-events-auto w-full overflow-hidden rounded-2xl border border-[#D4AF37]/35 bg-[#0B0F19]/96 shadow-[0_12px_40px_rgba(0,0,0,0.45)] backdrop-blur-md">
+            <div className="flex items-center justify-between gap-2 border-b border-white/[0.08] bg-black/35 px-3 py-2.5">
+              <div
+                aria-label="拖动危机追踪窗口"
+                onPointerDown={handleTrackerDragPointerDown}
+                onPointerMove={handleTrackerDragPointerMove}
+                onPointerUp={handleTrackerDragPointerUp}
+                onPointerCancel={handleTrackerDragPointerUp}
+                className="flex min-w-0 flex-1 cursor-grab touch-none select-none items-center gap-2 text-left text-white active:cursor-grabbing"
+              >
+                <GripVertical size={16} strokeWidth={2} className="shrink-0 text-[#D4AF37]/70" aria-hidden />
+                <Radar size={17} strokeWidth={2} className="shrink-0 text-[#D4AF37]" />
+                <span className="truncate text-sm font-bold tracking-tight">危机追踪</span>
+                <span className="rounded-full border border-[#D4AF37]/40 bg-[#D4AF37]/10 px-2 py-0.5 text-[10px] font-mono font-bold text-[#D4AF37]">
+                  {trackedCrisisItems.length}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTrackerExpanded((v) => !v)}
+                className="rounded-lg border border-white/10 p-1.5 text-gray-400 transition-colors hover:border-white/25 hover:text-white"
+                title={trackerExpanded ? '收起' : '展开'}
+              >
+                {trackerExpanded ? <ChevronDown size={16} strokeWidth={2.25} /> : <ChevronUp size={16} strokeWidth={2.25} />}
+              </button>
+            </div>
+            {trackerExpanded ? (
+              <div className="max-h-[min(42vh,22rem)] space-y-2 overflow-y-auto px-2.5 py-2.5 [scrollbar-width:thin] [scrollbar-color:rgba(212,175,55,0.45)_transparent]">
+                {trackedCrisisItems.length === 0 ? (
+                  <p className="px-1 py-3 text-center text-xs leading-relaxed text-gray-500">
+                    在头版或州危机卡片左上角点星标，即可将危机加入本面板并随时点开详情。
+                  </p>
+                ) : (
+                  trackedCrisisItems.map(({ ref, crisis: tc, label }) => (
+                    <div
+                      key={`${ref.scope}-${ref.id}`}
+                      className="group relative rounded-xl border border-white/[0.08] bg-white/[0.04] p-2.5 transition-colors hover:border-[#D4AF37]/38"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => openTrackedCrisisDetail(ref)}
+                        className="w-full text-left"
+                      >
+                        <div className="mb-1 pr-7 text-[10px] font-mono font-semibold uppercase tracking-[0.14em] text-[#D4AF37]/85">
+                          {label}
+                        </div>
+                        <div className="mb-2 line-clamp-2 text-[13px] font-bold leading-snug text-[#F5F2EC]">
+                          {tc.title}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className={`rounded border px-2 py-0.5 text-[10px] font-bold ${getTensionColor(tc.tension)}`}
+                          >
+                            {tc.tension}
+                          </span>
+                          <TrendBadge trend={tc.trend} size="sm" />
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        title="取消关注"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleTrackedCrisis(ref);
+                        }}
+                        className="absolute right-2 top-2 rounded-md border border-white/10 p-1 text-gray-500 opacity-0 transition-all hover:border-red-400/40 hover:text-red-300 group-hover:opacity-100"
+                      >
+                        <X size={13} strokeWidth={2.25} />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       {deleteConfirmTarget && (
         <div

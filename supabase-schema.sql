@@ -56,6 +56,9 @@ create table if not exists public.app_settings (
   display_date date not null,
   national_tension_percent integer not null default 85 check (national_tension_percent >= 0 and national_tension_percent <= 100),
   detail_modal_outlet text not null default 'random',
+  -- 时间线流动：现实 40 分钟 = 程序 3 天；display_date 为锚点日，started_at 为开始/恢复时刻
+  timeline_flowing boolean not null default false,
+  timeline_flow_started_at timestamptz,
   updated_at timestamptz not null default now()
 );
 
@@ -99,6 +102,22 @@ begin
     where table_schema = 'public' and table_name = 'app_settings' and column_name = 'detail_modal_outlet'
   ) then
     alter table public.app_settings add column detail_modal_outlet text not null default 'random';
+  end if;
+
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public' and table_name = 'app_settings' and column_name = 'timeline_flowing'
+  ) then
+    alter table public.app_settings add column timeline_flowing boolean not null default false;
+  end if;
+
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public' and table_name = 'app_settings' and column_name = 'timeline_flow_started_at'
+  ) then
+    alter table public.app_settings add column timeline_flow_started_at timestamptz;
   end if;
 
   if not exists (
